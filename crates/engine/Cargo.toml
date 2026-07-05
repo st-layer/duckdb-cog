@@ -1,8 +1,8 @@
 [package]
 name = "engine"            # 임시명 — 엔진 크레이트 네이밍은 미결 (RFC R6 참조)
 version = "0.0.1"
-edition.workspace = true
-license.workspace = true
+edition = "2021"
+license = "MIT"
 
 [dependencies]
 # async-tiff 는 Phase 0 스파이크에서 reader 경계(trait) 뒤로 도입한다.
