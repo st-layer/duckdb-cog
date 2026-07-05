@@ -1,0 +1,27 @@
+# PR 게이트: 로컬 판정 명령 `just check` 를 CI에서 동일하게 실행.
+# (빌드/익스텐션 E2E는 MainDistributionPipeline 담당 — 여기는 fmt/clippy/test/oracle)
+name: Lint
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: just check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 1.86.0 = MainDistributionPipeline의 wasm 잡 핀과 동일 버전 (clippy 드리프트 방지).
+      # rust-toolchain.toml은 두지 않는다 — extension-ci-tools의 잡별 툴체인 관리와 충돌 (PR #3).
+      - uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - uses: astral-sh/setup-uv@v5
+      - run: just check
