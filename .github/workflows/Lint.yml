@@ -16,7 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml(stable + rustfmt/clippy)을 rustup이 자동 적용
+      # 1.86.0 = MainDistributionPipeline의 wasm 잡 핀과 동일 버전 (clippy 드리프트 방지).
+      # rust-toolchain.toml은 두지 않는다 — extension-ci-tools의 잡별 툴체인 관리와 충돌 (PR #3).
+      - uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
       - uses: astral-sh/setup-uv@v5
