@@ -1,9 +1,0 @@
-[toolchain]
-# 1.86.0 핀: CI wasm 잡이 쓰는 emsdk 3.1.71 과 궁합이 검증된 버전
-# (extension-ci-tools 가 wasm 잡에 dtolnay/rust-toolchain@1.86.0 을 핀하는 이유와 동일).
-# 최신 stable 은 LLVM 신버전이 emsdk 구 wasm-opt 가 모르는 feature 를 내보내 링크 실패.
-channel = "1.86.0"
-components = ["rustfmt", "clippy"]
-# wasm 빌드(rust.Makefile)가 --target wasm32-unknown-emscripten 으로 돈다 —
-# rustup 이 toolchain 동기화 시 wasm std 를 함께 설치하게 한다 (E0463 방지).
-targets = ["wasm32-unknown-emscripten"]
