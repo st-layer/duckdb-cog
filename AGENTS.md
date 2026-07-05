@@ -49,7 +49,8 @@ GDAL-free COG reader for DuckDB. Cloud-Optimized GeoTIFF를 재인코딩·재투
 - **브랜치 전략 (GitHub Flow): 세션 = 슬라이스 = 브랜치 = PR.** main은 항상 그린이며
   직접 commit/push/merge 금지(`block_danger.py` 훅이 강제). 네이밍: `feat/*`, `fix/*`,
   `chore/*`, `docs/*`. PR은 슬라이스 하나만 담고 squash merge 후 브랜치 삭제.
-  머지는 사람이 GitHub에서 한다. 커밋 메시지에 co-author 트레일러를 넣지 않는다.
+  머지는 사람이 GitHub에서 한다. **PR 제목·본문은 영어로** (squash 시 main 히스토리가 된다).
+  커밋 메시지에 co-author 트레일러를 넣지 않는다.
 - 다중 파일 변경은 plan mode로 계획 → 승인 → 실행.
 - 태스크는 수직 슬라이스로: 픽스처 1개 → 기능 최소 경로 → 테스트 1개 통과.
 - TDD 순서: 테스트 작성 → 실패 확인 → 실패 테스트 커밋 → 구현 → `just check` 그린.
