@@ -1,0 +1,23 @@
+# PR 게이트: 로컬 판정 명령 `just check` 를 CI에서 동일하게 실행.
+# (빌드/익스텐션 E2E는 MainDistributionPipeline 담당 — 여기는 fmt/clippy/test/oracle)
+name: Lint
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: just check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml(stable + rustfmt/clippy)을 rustup이 자동 적용
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - uses: astral-sh/setup-uv@v5
+      - run: just check
