@@ -1,3 +1,7 @@
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
+# CI wasm 빌드(rust.Makefile)가 --target wasm32-unknown-emscripten 으로 돈다.
+# 이 파일이 CI가 설치한 툴체인(1.86.0+wasm std)을 덮어쓰므로, 여기에도 타깃을
+# 선언해 rustup 이 wasm std 를 함께 설치하게 한다 (E0463 방지).
+targets = ["wasm32-unknown-emscripten"]
