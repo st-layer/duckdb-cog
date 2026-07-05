@@ -1,0 +1,29 @@
+# name: test/sql/read_cog.test
+# description: read_cog(path) 스켈레톤 계약 — 타일 테이블 스키마(RFC §6.4 부분집합) + engine 배선
+# group: [cog]
+
+# 로드 전에는 함수가 없어야 한다
+statement error
+SELECT * FROM read_cog('fixture.tif');
+----
+Catalog Error
+
+# require 가 익스텐션을 로드한다
+require cog
+
+# 스키마: RFC §6.4 가벼운 컬럼 부분집합 (bbox/geometry/metadata는 다음 슬라이스)
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_cog('fixture.tif'));
+----
+id	BIGINT
+level	INTEGER
+tile_x	INTEGER
+tile_y	INTEGER
+cols	INTEGER
+rows	INTEGER
+
+# 더미 타일 1행 — id는 engine::pack_tile_key(0, 1, 2) = (1<<24)+2
+query IIIIII
+SELECT id, level, tile_x, tile_y, cols, rows FROM read_cog('fixture.tif');
+----
+16777218	0	1	2	256	256
