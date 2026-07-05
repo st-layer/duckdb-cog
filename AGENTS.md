@@ -46,6 +46,8 @@ GDAL-free COG reader for DuckDB. Cloud-Optimized GeoTIFF를 재인코딩·재투
 
 ## 작업 방식
 
+- **브랜치 전략: main에 직접 커밋 금지.** 정비/버그픽스는 `chore/*`, 기능 슬라이스는
+  `feat/*` 브랜치에서 작업한다. 커밋 메시지에 co-author 트레일러를 넣지 않는다.
 - 다중 파일 변경은 plan mode로 계획 → 승인 → 실행.
 - 태스크는 수직 슬라이스로: 픽스처 1개 → 기능 최소 경로 → 테스트 1개 통과.
 - TDD 순서: 테스트 작성 → 실패 확인 → 실패 테스트 커밋 → 구현 → `just check` 그린.

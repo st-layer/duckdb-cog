@@ -8,3 +8,4 @@ venv
 .claude/setting.local.json
 docs/worklog/
 .DS_Store
+.omc/
