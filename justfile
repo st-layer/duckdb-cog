@@ -32,7 +32,7 @@ ext:
     make debug
 
 # sqllogictest 실행 (test/sql/*.test) — LOAD 포함 E2E
-ext-test:
+ext-test: ext
     make test_debug
 
 # 결정적 픽스처 생성 (Phase 1에서 실체화 — seed 고정)
