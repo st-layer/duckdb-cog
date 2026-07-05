@@ -84,7 +84,7 @@ duckdb-cog에 배선할 최소 hook 세트 (`.claude/settings.json` + `.claude/h
 | `guard-deps` | PreToolUse (Edit/Write on Cargo.toml) | `gdal`, `proj-sys`, `geos` 문자열이 dev-dependencies 밖에 추가되면 차단 — N4를 물리적으로 강제 |
 | `fmt-on-write` | PostToolUse (Edit/Write on *.rs) | `cargo fmt` 자동 적용 — 스타일 지적에 컨텍스트 낭비 방지 |
 | `test-on-stop` | Stop | `just check` 실패 시 턴 종료 차단 → 에이전트가 스스로 수정 루프 계속 (8회 연속 차단 시 시스템이 해제하므로 무한루프 없음) |
-| `block-danger` | PreToolUse (Bash) | `git push --force`, `rm -rf`, main 직접 push 차단 |
+| `block-danger` | PreToolUse (Bash) | `git push --force`, `rm -rf`, main 직접 commit/push/merge 차단 (GitHub Flow 가드레일 — 완전 봉쇄는 GitHub 브랜치 보호) |
 
 `test-on-stop`이 이 하네스의 심장이다 — "완료 선언은 just check 통과 후"라는 규칙이 지시가 아니라 게이트가 된다.
 
