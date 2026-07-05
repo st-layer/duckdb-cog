@@ -9,3 +9,5 @@ venv
 docs/worklog/
 .DS_Store
 .omc/
+/test/data/generated/
+__pycache__/

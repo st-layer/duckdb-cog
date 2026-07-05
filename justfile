@@ -5,8 +5,8 @@ export DUCKDB_EXTENSION_MIN_DUCKDB_VERSION := "v1.5.4"
 
 default: check
 
-# 전체 판정 게이트 — 완료 판정의 유일한 기준
-check: fmt clippy test
+# 전체 판정 게이트 — 완료 판정의 유일한 기준 (빠른 것부터: HARNESS §2)
+check: fmt clippy test oracle
 
 fmt:
     cargo fmt --all -- --check
@@ -35,6 +35,10 @@ ext:
 ext-test: ext
     make test_debug
 
-# 결정적 픽스처 생성 (Phase 1에서 실체화 — seed 고정)
+# 결정적 픽스처 생성 (seed 고정 — 해시가 tests/oracle/fixtures.lock 과 일치해야 함)
 fixtures:
-    @echo "TODO(Phase 1): scripts/gen_fixtures.py — 합성 COG 매트릭스 생성"
+    uv run python scripts/gen_fixtures.py
+
+# rasterio 오라클 대조 테스트 (T1) — 픽스처 없으면 자동 생성
+oracle: fixtures
+    uv run pytest tests/oracle -x -q
