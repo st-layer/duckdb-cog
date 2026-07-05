@@ -1,0 +1,17 @@
+# name: test/sql/cog_version.test
+# description: bootstrap smoke — build → LOAD → query 전체 경로 검증
+# group: [cog]
+
+# 로드 전에는 함수가 없어야 한다
+statement error
+SELECT * FROM cog_version();
+----
+Catalog Error
+
+# require 가 익스텐션을 로드한다
+require cog
+
+query I
+SELECT * FROM cog_version();
+----
+duckdb-cog 0.0.1

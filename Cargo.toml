@@ -1,0 +1,28 @@
+# 표준: duckdb/extension-template-rs 구조 (익스텐션 크레이트가 리포 루트)
+# + workspace 로 crates/engine 을 함께 관리
+[package]
+name = "cog"                 # → libcog.so → cog.duckdb_extension
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = true
+strip = true
+
+# WASM(emscripten) 빌드용 staticlib 우회 — 템플릿 관례, 내용 변경 금지
+[[example]]
+name = "cog"
+path = "src/wasm_lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+duckdb = { version = "~1.10504.0", features = ["loadable-extension", "vscalar"] }
+engine = { path = "crates/engine" }
+
+[workspace]
+resolver = "2"
+members = ["crates/engine"]
