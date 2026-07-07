@@ -3,6 +3,11 @@
 export DUCKDB_EXTENSION_NAME := "cog"
 export DUCKDB_EXTENSION_MIN_DUCKDB_VERSION := "v1.5.4"
 
+# rustup 툴체인 우선 (homebrew cargo 1.86 은 async-tiff MSRV ≥1.87 미달).
+# rust-toolchain.toml 은 배포 CI의 잡별 툴체인 관리와 충돌해 쓰지 않는다 (PR #3) —
+# 로컬 버전 고정은 `rustup default`, CI 고정은 Lint.yml 의 dtolnay 액션이 담당.
+export PATH := env_var("HOME") / ".cargo/bin:" + env_var("PATH")
+
 default: check
 
 # 전체 판정 게이트 — 완료 판정의 유일한 기준 (빠른 것부터: HARNESS §2)

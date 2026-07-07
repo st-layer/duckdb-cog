@@ -6,13 +6,25 @@
 //! 불변식: GDAL/PROJ/GEOS 링크 금지(N4), TIFF 파싱 재구현 금지(N7),
 //! wasm32-unknown-unknown 컴파일 가능 유지(G8).
 
+#[cfg(feature = "reader")]
+mod meta;
+#[cfg(feature = "reader")]
+mod source;
+
+#[cfg(feature = "reader")]
+pub use meta::{enumerate_tiles, read_cog_meta, CogMeta, LevelMeta, MetaError, TileRow};
+#[cfg(feature = "reader")]
+pub use source::{ByteSource, MemorySource, SourceError};
+
+/// pack_tile_key 가 표현 가능한 최대 타일 인덱스 (24bit).
+pub const MAX_TILE_INDEX: u32 = (1 << 24) - 1;
+
 /// 타일 좌표를 단일 u64 키로 packing한다 (level 8bit | x 24bit | y 24bit).
 ///
 /// 이후 Hilbert/Morton SFC 키(RFC §6.6)로 대체될 자리표시 구현이며,
 /// 부트스트랩 단계에서 `just check` 가 실제로 무언가를 판정하게 하는 용도.
 pub fn pack_tile_key(level: u8, tile_x: u32, tile_y: u32) -> Option<u64> {
-    const MAX: u32 = (1 << 24) - 1;
-    if tile_x > MAX || tile_y > MAX {
+    if tile_x > MAX_TILE_INDEX || tile_y > MAX_TILE_INDEX {
         return None;
     }
     Some(((level as u64) << 48) | ((tile_x as u64) << 24) | (tile_y as u64))
