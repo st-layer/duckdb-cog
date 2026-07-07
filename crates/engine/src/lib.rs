@@ -15,6 +15,10 @@ mod source;
 pub use meta::{enumerate_tiles, read_cog_meta, CogMeta, LevelMeta, MetaError, TileRow};
 #[cfg(feature = "reader")]
 pub use source::{ByteSource, MemorySource, SourceError};
+// ByteSource 구현자가 시그니처 타입(Bytes, BoxFuture)과 block_on 을 별도 의존성
+// 없이 쓰도록 재수출.
+#[cfg(feature = "reader")]
+pub use {bytes, futures};
 
 /// pack_tile_key 가 표현 가능한 최대 타일 인덱스 (24bit).
 pub const MAX_TILE_INDEX: u32 = (1 << 24) - 1;

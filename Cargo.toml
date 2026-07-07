@@ -21,7 +21,15 @@ crate-type = ["staticlib"]
 
 [dependencies]
 duckdb = { version = "~1.10504.0", features = ["loadable-extension", "vscalar"] }
+
+# emscripten(DuckDB-Wasm 배포 잡)은 emsdk 3.1.71 궁합으로 Rust 1.86 고정인데
+# async-tiff 는 MSRV ≥1.87 — 그 타깃에서만 engine 의 reader feature 를 끈다.
+# read_cog 는 DuckDB-Wasm 빌드에서 제외 (RFC 사이드카 결정과 일관, worklog 참조).
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
 engine = { path = "crates/engine" }
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+engine = { path = "crates/engine", default-features = false }
 
 [workspace]
 resolver = "2"
