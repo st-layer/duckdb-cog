@@ -41,8 +41,15 @@ ext:
 ext-test: ext fixtures
     COG_TEST_FIXTURES=test/data/generated make test_debug
 
-# 엔진 wasm32-unknown-unknown 컴파일 판정 (RFC G8) — rustup 환경 필요, CI 상시 실행
+# 엔진 wasm32-unknown-unknown 컴파일 판정 (RFC G8) — rustup 환경 필요, CI 상시 실행.
+# macOS: Apple clang 은 wasm 타깃 미지원(zstd-sys C 빌드) — homebrew llvm 이 있으면 사용.
 wasm-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+        export CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang
+        export AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar
+    fi
     cargo check -p engine --target wasm32-unknown-unknown
 
 # 결정적 픽스처 생성 (seed 고정 — 해시가 tests/oracle/fixtures.lock 과 일치해야 함)

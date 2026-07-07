@@ -1,5 +1,5 @@
-# PR 게이트: 로컬 판정 명령 `just check` 를 CI에서 동일하게 실행.
-# (빌드/익스텐션 E2E는 MainDistributionPipeline 담당 — 여기는 fmt/clippy/test/oracle)
+# PR 게이트: 로컬 판정 명령들을 CI에서 동일하게 실행.
+# (플랫폼 매트릭스 빌드/배포는 MainDistributionPipeline 담당)
 name: Lint
 on:
   push:
@@ -16,12 +16,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # 1.86.0 = MainDistributionPipeline의 wasm 잡 핀과 동일 버전 (clippy 드리프트 방지).
-      # rust-toolchain.toml은 두지 않는다 — extension-ci-tools의 잡별 툴체인 관리와 충돌 (PR #3).
-      - uses: dtolnay/rust-toolchain@1.86.0
+      # 1.88.0 = async-tiff MSRV(≥1.87) 충족 최소 안정판. 배포 파이프라인의 wasm 잡은
+      # 1.86 고정(emsdk 3.1.71 궁합) — 그래서 emscripten 타깃은 reader feature 를 뺀다.
+      # rust-toolchain.toml 은 두지 않는다 — CI 잡별 툴체인 관리와 충돌 (PR #3).
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
       - uses: astral-sh/setup-uv@v5
       - run: just check
+      # RFC G8: engine 은 wasm32-unknown-unknown 컴파일 가능 상태 유지
+      - run: just wasm-check
+
+  # 픽스처 의존 sqllogictest — 배포 파이프라인엔 픽스처가 없어(require-env 스킵)
+  # PR 게이트에서 E2E 를 돌린다
+  e2e:
+    name: just ext-test (sqllogictest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - uses: astral-sh/setup-uv@v5
+      - run: make configure
+      - run: just ext-test
