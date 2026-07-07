@@ -32,8 +32,13 @@ ext:
     make debug
 
 # sqllogictest 실행 (test/sql/*.test) — LOAD 포함 E2E
-ext-test: ext
-    make test_debug
+# COG_TEST_FIXTURES 가 픽스처 의존 테스트를 켠다 (없으면 require-env 가 스킵)
+ext-test: ext fixtures
+    COG_TEST_FIXTURES=test/data/generated make test_debug
+
+# 엔진 wasm32-unknown-unknown 컴파일 판정 (RFC G8) — rustup 환경 필요, CI 상시 실행
+wasm-check:
+    cargo check -p engine --target wasm32-unknown-unknown
 
 # 결정적 픽스처 생성 (seed 고정 — 해시가 tests/oracle/fixtures.lock 과 일치해야 함)
 fixtures:
