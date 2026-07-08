@@ -1,19 +1,22 @@
 # name: test/sql/read_cog.test
-# description: read_cog(path) 스켈레톤 계약 — 타일 테이블 스키마(RFC §6.4 부분집합) + engine 배선
+# description: read_cog(path) — 실제 COG 타일 그리드 나열 계약 (RFC §6.4 부분집합)
 # group: [cog]
 
-# 로드 전에는 함수가 없어야 한다
+# 로드 전에는 함수가 없어야 한다 (파일 불필요)
 statement error
-SELECT * FROM read_cog('fixture.tif');
+SELECT * FROM read_cog('x.tif');
 ----
 Catalog Error
 
 # require 가 익스텐션을 로드한다
 require cog
 
-# 스키마: RFC §6.4 가벼운 컬럼 부분집합 (bbox/geometry/metadata는 다음 슬라이스)
+# 이하 검증은 생성된 픽스처가 필요 — 없는 환경(배포 CI)에서는 스킵
+require-env COG_TEST_FIXTURES
+
+# 스키마: RFC §6.4 가벼운 컬럼 부분집합 (bind 가 실제 파일을 연다)
 query TT
-SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_cog('fixture.tif'));
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif'));
 ----
 id	BIGINT
 level	INTEGER
@@ -22,8 +25,19 @@ tile_y	INTEGER
 cols	INTEGER
 rows	INTEGER
 
-# 더미 타일 1행 — id는 engine::pack_tile_key(0, 1, 2) = (1<<24)+2
+# 실타일 그리드: 512x512, 256px 타일 → 레벨0 = 2x2, 오버뷰(256x256) = 1x1, 총 5행
+# id = pack_tile_key(level, x, y) = level<<48 | x<<24 | y
 query IIIIII
-SELECT id, level, tile_x, tile_y, cols, rows FROM read_cog('fixture.tif');
+SELECT id, level, tile_x, tile_y, cols, rows FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif') ORDER BY level, tile_y, tile_x;
 ----
-16777218	0	1	2	256	256
+0	0	0	0	256	256
+16777216	0	1	0	256	256
+1	0	0	1	256	256
+16777217	0	1	1	256	256
+281474976710656	1	0	0	256	256
+
+# 없는 파일은 bind 에러 (에러 메시지에 경로 포함)
+statement error
+SELECT * FROM read_cog('${COG_TEST_FIXTURES}/no_such.tif');
+----
+no_such.tif
