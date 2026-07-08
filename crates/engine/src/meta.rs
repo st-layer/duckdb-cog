@@ -220,7 +220,7 @@ mod tests {
         }
     }
 
-    fn utm52 (origin_x: f64, origin_y: f64) -> Georef {
+    fn utm52(origin_x: f64, origin_y: f64) -> Georef {
         Georef {
             epsg: Some(32652),
             origin_x,
@@ -257,10 +257,19 @@ mod tests {
         // basic 픽스처와 동일 수치 — sqllogictest 기대값과 3중 대조 (rasterio 포함)
         let meta = basic_meta(Some(utm52(300000.0, 4000000.0)));
         let rows: Vec<TileRow> = enumerate_tiles(&meta).collect();
-        assert_eq!(rows[0].bbox, Some([300000.0, 3997440.0, 302560.0, 4000000.0]));
-        assert_eq!(rows[3].bbox, Some([302560.0, 3994880.0, 305120.0, 3997440.0]));
+        assert_eq!(
+            rows[0].bbox,
+            Some([300000.0, 3997440.0, 302560.0, 4000000.0])
+        );
+        assert_eq!(
+            rows[3].bbox,
+            Some([302560.0, 3994880.0, 305120.0, 3997440.0])
+        );
         // 오버뷰(20m 유도)는 전체 범위
-        assert_eq!(rows[4].bbox, Some([300000.0, 3994880.0, 305120.0, 4000000.0]));
+        assert_eq!(
+            rows[4].bbox,
+            Some([300000.0, 3994880.0, 305120.0, 4000000.0])
+        );
         assert_eq!(meta.crs(), Some("EPSG:32652".to_string()));
     }
 
@@ -272,9 +281,18 @@ mod tests {
             georef: Some(utm52(500000.0, 3800000.0)),
         };
         let rows: Vec<TileRow> = enumerate_tiles(&meta).collect();
-        assert_eq!(rows[1].bbox, Some([502560.0, 3797440.0, 504000.0, 3800000.0]));
-        assert_eq!(rows[3].bbox, Some([502560.0, 3797000.0, 504000.0, 3797440.0]));
-        assert_eq!(rows[4].bbox, Some([500000.0, 3797000.0, 504000.0, 3800000.0]));
+        assert_eq!(
+            rows[1].bbox,
+            Some([502560.0, 3797440.0, 504000.0, 3800000.0])
+        );
+        assert_eq!(
+            rows[3].bbox,
+            Some([502560.0, 3797000.0, 504000.0, 3797440.0])
+        );
+        assert_eq!(
+            rows[4].bbox,
+            Some([500000.0, 3797000.0, 504000.0, 3800000.0])
+        );
         // 물리 타일 크기는 클립되지 않는다
         assert!(rows.iter().all(|r| (r.cols, r.rows) == (256, 256)));
     }
