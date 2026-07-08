@@ -21,21 +21,21 @@ OUT_DIR = ROOT / "test" / "data" / "generated"
 LOCK = ROOT / "tests" / "oracle" / "fixtures.lock"
 
 
-def gen_basic_512x512_u16(path: Path) -> None:
-    """512x512 단일밴드 uint16, 256px 타일, 오버뷰 1레벨, EPSG:32652, 10m."""
+def gen_cog_u16(path: Path, width: int, height: int, origin_x: float, origin_y: float) -> None:
+    """단일밴드 uint16 COG: 256px 타일, 자동 오버뷰, EPSG:32652, 10m, seed 고정."""
     rng = np.random.default_rng(42)
     # 0 은 nodata 로 예약 — 데이터 값은 1..65535
-    data = rng.integers(1, 65536, size=(512, 512), dtype=np.uint16)
+    data = rng.integers(1, 65536, size=(height, width), dtype=np.uint16)
     with rasterio.open(
         path,
         "w",
         driver="COG",
-        width=512,
-        height=512,
+        width=width,
+        height=height,
         count=1,
         dtype="uint16",
         crs="EPSG:32652",
-        transform=from_origin(300000.0, 4000000.0, 10.0, 10.0),
+        transform=from_origin(origin_x, origin_y, 10.0, 10.0),
         nodata=0,
         blocksize=256,
         compress="NONE",  # 압축 변종은 픽스처 매트릭스(다음)에서 — 여기선 결정성 우선
@@ -45,7 +45,10 @@ def gen_basic_512x512_u16(path: Path) -> None:
 
 
 FIXTURES = {
-    "basic_512x512_u16.tif": gen_basic_512x512_u16,
+    # 타일 크기로 나누어떨어지는 기본 케이스
+    "basic_512x512_u16.tif": lambda p: gen_cog_u16(p, 512, 512, 300000.0, 4000000.0),
+    # 엣지 클리핑 케이스 — 400x300 은 256 으로 나누어떨어지지 않음
+    "edge_400x300_u16.tif": lambda p: gen_cog_u16(p, 400, 300, 500000.0, 3800000.0),
 }
 
 
