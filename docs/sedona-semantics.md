@@ -18,6 +18,8 @@ RFC §6.8/R10: Apache Sedona `RS_*` 카탈로그는 **참조이지 계약이 아
 - 없는 파일·비 COG 경로는 NULL 이 아니라 **에러** (경로 포함) — bind 실패와 동급.
 - skew: ModelPixelScale+ModelTiepoint 경로만 지원하므로 georef 가 있으면 항상 0.0.
   (회전 ModelTransformation 만 있는 파일은 georef 자체가 없음 — georef 파생 함수 NULL.)
+- INTEGER 반환 함수(Width/Height/NumBands/SRID)는 i32 상한(2³¹−1) 초과 값을
+  NULL 로 강등한다 — 현실적 COG 에선 도달 불가하나 "항상 존재" 의 이론적 예외.
 
 ## Phase 1 함수별 계약
 
