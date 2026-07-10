@@ -1,4 +1,4 @@
-//! 타일-테이블 도메인 모델 (RFC §6.4): COG 메타데이터 → 레벨/타일 그리드.
+//! 타일-테이블 도메인 모델 (RFC §6.4): COG 메타데이터 → 레벨/타일 그리드 + bbox.
 //!
 //! 픽셀은 건드리지 않는다 — IFD 메타데이터만 읽어 read_cog() 의 행을 만든다.
 
@@ -8,7 +8,7 @@ use crate::source::{ByteSource, FetchAdapter};
 use crate::{pack_tile_key, MAX_TILE_INDEX};
 
 /// COG 한 레벨(본체 IFD 또는 오버뷰 IFD)의 타일 그리드 메타데이터.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LevelMeta {
     pub level: u8,
     pub image_width: u32,
@@ -19,15 +19,44 @@ pub struct LevelMeta {
     pub tiles_y: u32,
 }
 
+/// IFD0 의 GeoTIFF 태그에서 뽑은 georeference (level 0 기준).
+///
+/// 오버뷰 IFD 에는 geo 태그가 없는 것이 GDAL COG 관행 — 레벨 N 픽셀 크기는
+/// 크기 비율(width0/widthN)로 유도하고 origin 은 공유한다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Georef {
+    /// EPSG 코드 (projected 우선, 없으면 geographic).
+    pub epsg: Option<u32>,
+    pub origin_x: f64,
+    pub origin_y: f64,
+    /// level 0 픽셀 크기 (양수; y 는 북→남 진행으로 적용 시 감산).
+    pub pixel_x: f64,
+    pub pixel_y: f64,
+}
+
 /// COG 전체 메타데이터 — 레벨 순서는 IFD 순서(본체=0, 오버뷰=1..).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CogMeta {
     pub levels: Vec<LevelMeta>,
+    /// geo 태그 부재 시 None — bbox/crs 는 NULL 로 강등 (graceful degradation).
+    pub georef: Option<Georef>,
+}
+
+impl CogMeta {
+    /// CRS 문자열 표현 ("EPSG:32652" 꼴). georef 나 EPSG 부재 시 None.
+    pub fn crs(&self) -> Option<String> {
+        self.georef
+            .as_ref()
+            .and_then(|g| g.epsg)
+            .map(|e| format!("EPSG:{e}"))
+    }
 }
 
 /// read_cog() 한 행 — RFC §6.4 가벼운 컬럼 부분집합.
-/// cols/rows 는 TIFF 물리 타일 크기(엣지 클리핑 아님).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// cols/rows 는 TIFF 물리 타일 크기(엣지 클리핑 아님). bbox 는 반대로
+/// **데이터 범위** — 엣지 타일은 이미지 경계로 클립된다 (§6.6 pruning 용도).
+#[derive(Debug, Clone, PartialEq)]
 pub struct TileRow {
     pub id: u64,
     pub level: u8,
@@ -35,6 +64,8 @@ pub struct TileRow {
     pub tile_y: u32,
     pub cols: u32,
     pub rows: u32,
+    /// [xmin, ymin, xmax, ymax] — georef 부재 시 None.
+    pub bbox: Option<[f64; 4]>,
 }
 
 #[derive(Debug)]
@@ -61,7 +92,7 @@ impl std::fmt::Display for MetaError {
 
 impl std::error::Error for MetaError {}
 
-/// COG 메타데이터를 읽어 레벨별 타일 그리드를 구성한다.
+/// COG 메타데이터를 읽어 레벨별 타일 그리드와 georeference 를 구성한다.
 ///
 /// async-tiff 호출은 여기(와 source.rs 어댑터)에만 존재한다 (RFC R8).
 pub async fn read_cog_meta<S: ByteSource>(source: S) -> Result<CogMeta, MetaError> {
@@ -73,6 +104,27 @@ pub async fn read_cog_meta<S: ByteSource>(source: S) -> Result<CogMeta, MetaErro
         .read_all_ifds(&fetch)
         .await
         .map_err(|e| MetaError::Tiff(e.to_string()))?;
+
+    // georeference 는 IFD0 에서만 (GDAL COG 관행 — 오버뷰엔 geo 태그가 없다)
+    let georef = ifds.first().and_then(|ifd0| {
+        let scale = ifd0.model_pixel_scale()?;
+        let tie = ifd0.model_tiepoint()?;
+        if scale.len() < 2 || tie.len() < 6 {
+            return None;
+        }
+        let epsg = ifd0
+            .geo_key_directory()
+            .and_then(|g| g.projected_type.or(g.geographic_type))
+            .map(u32::from);
+        // tiepoint = [i, j, k, x, y, z]: 래스터 (i,j) ↔ 모델 (x,y)
+        Some(Georef {
+            epsg,
+            origin_x: tie[3] - tie[0] * scale[0],
+            origin_y: tie[4] + tie[1] * scale[1],
+            pixel_x: scale[0],
+            pixel_y: scale[1],
+        })
+    });
 
     let mut levels = Vec::with_capacity(ifds.len());
     for (i, ifd) in ifds.iter().enumerate() {
@@ -99,14 +151,34 @@ pub async fn read_cog_meta<S: ByteSource>(source: S) -> Result<CogMeta, MetaErro
             tiles_y,
         });
     }
-    Ok(CogMeta { levels })
+    Ok(CogMeta { levels, georef })
+}
+
+/// 한 타일의 데이터 bbox — 이미지 경계로 클립, 레벨 픽셀 크기는 크기 비율로 유도.
+fn tile_bbox(g: &Georef, base: (f64, f64), l: &LevelMeta, tx: u32, ty: u32) -> [f64; 4] {
+    let sx = g.pixel_x * (base.0 / l.image_width as f64);
+    let sy = g.pixel_y * (base.1 / l.image_height as f64);
+    let px_min = (tx as u64 * l.tile_width as u64) as f64;
+    let px_max = ((tx as u64 + 1) * l.tile_width as u64).min(l.image_width as u64) as f64;
+    let py_min = (ty as u64 * l.tile_height as u64) as f64;
+    let py_max = ((ty as u64 + 1) * l.tile_height as u64).min(l.image_height as u64) as f64;
+    [
+        g.origin_x + px_min * sx,
+        g.origin_y - py_max * sy,
+        g.origin_x + px_max * sx,
+        g.origin_y - py_min * sy,
+    ]
 }
 
 /// 레벨→행(y)→열(x) 순서로 전 타일을 나열한다. id 는 [`pack_tile_key`].
 ///
 /// `read_cog_meta` 가 인덱스 범위를 검증했으므로 packing 은 실패하지 않는다.
 pub fn enumerate_tiles(meta: &CogMeta) -> impl Iterator<Item = TileRow> + '_ {
-    meta.levels.iter().flat_map(|l| {
+    let base = meta
+        .levels
+        .first()
+        .map(|l0| (l0.image_width as f64, l0.image_height as f64));
+    meta.levels.iter().flat_map(move |l| {
         (0..l.tiles_y).flat_map(move |y| {
             (0..l.tiles_x).map(move |x| TileRow {
                 id: pack_tile_key(l.level, x, y).expect("validated by read_cog_meta"),
@@ -115,6 +187,10 @@ pub fn enumerate_tiles(meta: &CogMeta) -> impl Iterator<Item = TileRow> + '_ {
                 tile_y: y,
                 cols: l.tile_width,
                 rows: l.tile_height,
+                bbox: match (&meta.georef, base) {
+                    (Some(g), Some(b)) => Some(tile_bbox(g, b, l, x, y)),
+                    _ => None,
+                },
             })
         })
     })
@@ -124,35 +200,39 @@ pub fn enumerate_tiles(meta: &CogMeta) -> impl Iterator<Item = TileRow> + '_ {
 mod tests {
     use super::*;
 
-    fn basic_meta() -> CogMeta {
+    fn level(level: u8, w: u32, h: u32, tx: u32, ty: u32) -> LevelMeta {
+        LevelMeta {
+            level,
+            image_width: w,
+            image_height: h,
+            tile_width: 256,
+            tile_height: 256,
+            tiles_x: tx,
+            tiles_y: ty,
+        }
+    }
+
+    fn basic_meta(georef: Option<Georef>) -> CogMeta {
         // basic_512x512_u16 픽스처와 동형: 레벨0 2x2, 오버뷰 1x1
         CogMeta {
-            levels: vec![
-                LevelMeta {
-                    level: 0,
-                    image_width: 512,
-                    image_height: 512,
-                    tile_width: 256,
-                    tile_height: 256,
-                    tiles_x: 2,
-                    tiles_y: 2,
-                },
-                LevelMeta {
-                    level: 1,
-                    image_width: 256,
-                    image_height: 256,
-                    tile_width: 256,
-                    tile_height: 256,
-                    tiles_x: 1,
-                    tiles_y: 1,
-                },
-            ],
+            levels: vec![level(0, 512, 512, 2, 2), level(1, 256, 256, 1, 1)],
+            georef,
+        }
+    }
+
+    fn utm52(origin_x: f64, origin_y: f64) -> Georef {
+        Georef {
+            epsg: Some(32652),
+            origin_x,
+            origin_y,
+            pixel_x: 10.0,
+            pixel_y: 10.0,
         }
     }
 
     #[test]
     fn enumerates_all_levels_in_row_major_order() {
-        let rows: Vec<TileRow> = enumerate_tiles(&basic_meta()).collect();
+        let rows: Vec<TileRow> = enumerate_tiles(&basic_meta(None)).collect();
         assert_eq!(rows.len(), 5);
         let coords: Vec<(u8, u32, u32)> =
             rows.iter().map(|r| (r.level, r.tile_x, r.tile_y)).collect();
@@ -167,8 +247,53 @@ mod tests {
     }
 
     #[test]
-    fn empty_meta_yields_no_rows() {
-        let meta = CogMeta { levels: vec![] };
-        assert_eq!(enumerate_tiles(&meta).count(), 0);
+    fn no_georef_yields_null_bbox() {
+        assert!(enumerate_tiles(&basic_meta(None)).all(|r| r.bbox.is_none()));
+        assert_eq!(basic_meta(None).crs(), None);
+    }
+
+    #[test]
+    fn bbox_values_match_fixture_expectations() {
+        // basic 픽스처와 동일 수치 — sqllogictest 기대값과 3중 대조 (rasterio 포함)
+        let meta = basic_meta(Some(utm52(300000.0, 4000000.0)));
+        let rows: Vec<TileRow> = enumerate_tiles(&meta).collect();
+        assert_eq!(
+            rows[0].bbox,
+            Some([300000.0, 3997440.0, 302560.0, 4000000.0])
+        );
+        assert_eq!(
+            rows[3].bbox,
+            Some([302560.0, 3994880.0, 305120.0, 3997440.0])
+        );
+        // 오버뷰(20m 유도)는 전체 범위
+        assert_eq!(
+            rows[4].bbox,
+            Some([300000.0, 3994880.0, 305120.0, 4000000.0])
+        );
+        assert_eq!(meta.crs(), Some("EPSG:32652".to_string()));
+    }
+
+    #[test]
+    fn edge_tiles_clip_to_image_extent() {
+        // edge_400x300_u16 픽스처와 동형: 우/하단 클립 + 오버뷰 200x150
+        let meta = CogMeta {
+            levels: vec![level(0, 400, 300, 2, 2), level(1, 200, 150, 1, 1)],
+            georef: Some(utm52(500000.0, 3800000.0)),
+        };
+        let rows: Vec<TileRow> = enumerate_tiles(&meta).collect();
+        assert_eq!(
+            rows[1].bbox,
+            Some([502560.0, 3797440.0, 504000.0, 3800000.0])
+        );
+        assert_eq!(
+            rows[3].bbox,
+            Some([502560.0, 3797000.0, 504000.0, 3797440.0])
+        );
+        assert_eq!(
+            rows[4].bbox,
+            Some([500000.0, 3797000.0, 504000.0, 3800000.0])
+        );
+        // 물리 타일 크기는 클립되지 않는다
+        assert!(rows.iter().all(|r| (r.cols, r.rows) == (256, 256)));
     }
 }

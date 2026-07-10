@@ -1,5 +1,5 @@
 # name: test/sql/read_cog.test
-# description: read_cog(path) — 실제 COG 타일 그리드 나열 계약 (RFC §6.4 부분집합)
+# description: read_cog(path) — 타일 그리드 + bbox/CRS 계약 (RFC §6.4 부분집합)
 # group: [cog]
 
 # 로드 전에는 함수가 없어야 한다 (파일 불필요)
@@ -14,7 +14,7 @@ require cog
 # 이하 검증은 생성된 픽스처가 필요 — 없는 환경(배포 CI)에서는 스킵
 require-env COG_TEST_FIXTURES
 
-# 스키마: RFC §6.4 가벼운 컬럼 부분집합 (bind 가 실제 파일을 연다)
+# 스키마: RFC §6.4 가벼운 컬럼 부분집합. bbox 는 GeoParquet 관례의 STRUCT.
 query TT
 SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif'));
 ----
@@ -24,9 +24,10 @@ tile_x	INTEGER
 tile_y	INTEGER
 cols	INTEGER
 rows	INTEGER
+bbox	STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE)
+crs	VARCHAR
 
-# 실타일 그리드: 512x512, 256px 타일 → 레벨0 = 2x2, 오버뷰(256x256) = 1x1, 총 5행
-# id = pack_tile_key(level, x, y) = level<<48 | x<<24 | y
+# 실타일 그리드: 512x512, 256px 타일 → 레벨0 2x2 + 오버뷰(256x256) 1x1 = 5행
 query IIIIII
 SELECT id, level, tile_x, tile_y, cols, rows FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif') ORDER BY level, tile_y, tile_x;
 ----
@@ -35,6 +36,36 @@ SELECT id, level, tile_x, tile_y, cols, rows FROM read_cog('${COG_TEST_FIXTURES}
 1	0	0	1	256	256
 16777217	0	1	1	256	256
 281474976710656	1	0	0	256	256
+
+# bbox/crs: origin (300000, 4000000), 10m 해상도. 값은 전부 정수 미터 — 정확 비교.
+# 오버뷰(level 1)는 20m(크기 비율 유도)로 전체 범위를 덮는다.
+query IIIIIT
+SELECT bbox.xmin::BIGINT, bbox.ymin::BIGINT, bbox.xmax::BIGINT, bbox.ymax::BIGINT, id, crs FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif') ORDER BY level, tile_y, tile_x;
+----
+300000	3997440	302560	4000000	0	EPSG:32652
+302560	3997440	305120	4000000	16777216	EPSG:32652
+300000	3994880	302560	3997440	1	EPSG:32652
+302560	3994880	305120	3997440	16777217	EPSG:32652
+300000	3994880	305120	4000000	281474976710656	EPSG:32652
+
+# 엣지 클리핑: 400x300 은 256 으로 나누어떨어지지 않음 — bbox 는 데이터 범위로 클립.
+# 이미지 범위 x 500000..504000, y 3797000..3800000 (rasterio ds.bounds 와 동일 수치,
+# tests/oracle/test_fixture_edge.py 가 오라클로 상호 검증).
+query IIIIIII
+SELECT level, tile_x, tile_y, bbox.xmin::BIGINT, bbox.ymin::BIGINT, bbox.xmax::BIGINT, bbox.ymax::BIGINT FROM read_cog('${COG_TEST_FIXTURES}/edge_400x300_u16.tif') ORDER BY level, tile_y, tile_x;
+----
+0	0	0	500000	3797440	502560	3800000
+0	1	0	502560	3797440	504000	3800000
+0	0	1	500000	3797000	502560	3797440
+0	1	1	502560	3797000	504000	3797440
+1	0	0	500000	3797000	504000	3800000
+
+# cols/rows 는 클립되지 않는 물리 타일 크기 (bbox 와 의미 구분 계약)
+query III
+SELECT DISTINCT level, cols, rows FROM read_cog('${COG_TEST_FIXTURES}/edge_400x300_u16.tif') ORDER BY level;
+----
+0	256	256
+1	256	256
 
 # 없는 파일은 bind 에러 (에러 메시지에 경로 포함)
 statement error

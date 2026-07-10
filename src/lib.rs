@@ -127,6 +127,8 @@ impl engine::ByteSource for FileSource {
 struct ReadCogBindData {
     /// bind 시점에 메타데이터만 읽어 확정된 전체 타일 목록 (픽셀 미접촉).
     tiles: Vec<engine::TileRow>,
+    /// 파일 단위 CRS ("EPSG:32652" 꼴) — 행마다 복제 노출, 부재 시 NULL.
+    crs: Option<std::ffi::CString>,
 }
 
 #[cfg(not(target_os = "emscripten"))]
@@ -154,6 +156,17 @@ impl VTab for ReadCogVTab {
         bind.add_result_column("tile_y", LogicalTypeHandle::from(LogicalTypeId::Integer));
         bind.add_result_column("cols", LogicalTypeHandle::from(LogicalTypeId::Integer));
         bind.add_result_column("rows", LogicalTypeHandle::from(LogicalTypeId::Integer));
+        let double = || LogicalTypeHandle::from(LogicalTypeId::Double);
+        bind.add_result_column(
+            "bbox",
+            LogicalTypeHandle::struct_type(&[
+                ("xmin", double()),
+                ("ymin", double()),
+                ("xmax", double()),
+                ("ymax", double()),
+            ]),
+        );
+        bind.add_result_column("crs", LogicalTypeHandle::from(LogicalTypeId::Varchar));
 
         let path = bind.get_parameter(0).to_string();
         let source =
@@ -163,6 +176,7 @@ impl VTab for ReadCogVTab {
             .map_err(|e| format!("read_cog: '{path}': {e}"))?;
         Ok(ReadCogBindData {
             tiles: engine::enumerate_tiles(&meta).collect(),
+            crs: meta.crs().map(std::ffi::CString::new).transpose()?,
         })
     }
 
@@ -210,6 +224,35 @@ impl VTab for ReadCogVTab {
                 let v = v.as_mut_slice::<i32>();
                 for (i, t) in batch.iter().enumerate() {
                     v[i] = get(t);
+                }
+            }
+            // bbox STRUCT: 자식(xmin,ymin,xmax,ymax) 채우고, georef 부재 행은 struct NULL
+            let mut bbox = output.struct_vector(6);
+            for ci in 0..4 {
+                let mut child = bbox.child(ci, batch.len());
+                let child = child.as_mut_slice::<f64>();
+                for (i, t) in batch.iter().enumerate() {
+                    if let Some(b) = t.bbox {
+                        child[i] = b[ci];
+                    }
+                }
+            }
+            for (i, t) in batch.iter().enumerate() {
+                if t.bbox.is_none() {
+                    bbox.set_null(i);
+                }
+            }
+        }
+        let mut crs_vec = output.flat_vector(7);
+        match &func.get_bind_data().crs {
+            Some(crs) => {
+                for i in 0..batch.len() {
+                    crs_vec.insert(i, crs.clone());
+                }
+            }
+            None => {
+                for i in 0..batch.len() {
+                    crs_vec.set_null(i);
                 }
             }
         }
