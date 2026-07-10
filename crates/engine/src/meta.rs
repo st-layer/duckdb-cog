@@ -40,6 +40,10 @@ pub struct CogMeta {
     pub levels: Vec<LevelMeta>,
     /// geo 태그 부재 시 None — bbox/crs 는 NULL 로 강등 (graceful degradation).
     pub georef: Option<Georef>,
+    /// IFD0 SamplesPerPixel — 밴드 수.
+    pub num_bands: u32,
+    /// IFD0 GDAL_NODATA 태그 — 부재 시 None. GDAL 관행상 전 밴드 공통.
+    pub nodata: Option<f64>,
 }
 
 impl CogMeta {
@@ -50,6 +54,63 @@ impl CogMeta {
             .and_then(|g| g.epsg)
             .map(|e| format!("EPSG:{e}"))
     }
+
+    /// level 0 이미지 폭 (픽셀). 레벨 부재 시 None.
+    pub fn width(&self) -> Option<u32> {
+        self.levels.first().map(|l| l.image_width)
+    }
+
+    /// level 0 이미지 높이 (픽셀). 레벨 부재 시 None.
+    pub fn height(&self) -> Option<u32> {
+        self.levels.first().map(|l| l.image_height)
+    }
+
+    /// EPSG 코드 — 부재 시 0 (Sedona/PostGIS RS_SRID 관례; crs() 의 None 과 다름).
+    pub fn srid(&self) -> u32 {
+        self.georef.as_ref().and_then(|g| g.epsg).unwrap_or(0)
+    }
+
+    /// 1-based `band` 의 nodata. 범위 밖·nodata 부재 → None (RS_ NULL 규약).
+    pub fn band_nodata(&self, band: u32) -> Option<f64> {
+        if band == 0 || band > self.num_bands {
+            return None;
+        }
+        self.nodata
+    }
+
+    /// GDAL 포맷 georeference 텍스트 (RFC §6.8 순서:
+    /// scaleX, skewY, skewX, scaleY, upperLeftX, upperLeftY — %.6f, 줄바꿈 구분).
+    pub fn georeference_gdal(&self) -> Option<String> {
+        self.georef.as_ref().map(|g| {
+            let (sx, sy) = g.scale_gdal();
+            let (kx, ky) = g.skew();
+            format!(
+                "{sx:.6}\n{ky:.6}\n{kx:.6}\n{sy:.6}\n{:.6}\n{:.6}",
+                g.origin_x, g.origin_y
+            )
+        })
+    }
+}
+
+impl Georef {
+    /// GDAL 순서 스케일 (scaleX, scaleY) — north-up 관례로 y 는 음수.
+    pub fn scale_gdal(&self) -> (f64, f64) {
+        (self.pixel_x, -self.pixel_y)
+    }
+
+    /// (skewX, skewY) — ModelPixelScale+Tiepoint 경로만 지원하므로 항상 0.
+    pub fn skew(&self) -> (f64, f64) {
+        (0.0, 0.0)
+    }
+}
+
+/// GDAL_NODATA 태그 문자열 파싱 — 공백 trim, "nan"(대소문자 무관) 지원.
+fn parse_gdal_nodata(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("nan") {
+        return Some(f64::NAN);
+    }
+    s.parse().ok()
 }
 
 /// read_cog() 한 행 — RFC §6.4 가벼운 컬럼 부분집합.
@@ -105,6 +166,16 @@ pub async fn read_cog_meta<S: ByteSource>(source: S) -> Result<CogMeta, MetaErro
         .await
         .map_err(|e| MetaError::Tiff(e.to_string()))?;
 
+    // 밴드 수·nodata 도 IFD0 기준 (GDAL 관행상 전 밴드 공통)
+    let num_bands = ifds
+        .first()
+        .map(|ifd0| u32::from(ifd0.samples_per_pixel()))
+        .unwrap_or(0);
+    let nodata = ifds
+        .first()
+        .and_then(|ifd0| ifd0.gdal_nodata())
+        .and_then(parse_gdal_nodata);
+
     // georeference 는 IFD0 에서만 (GDAL COG 관행 — 오버뷰엔 geo 태그가 없다)
     let georef = ifds.first().and_then(|ifd0| {
         let scale = ifd0.model_pixel_scale()?;
@@ -151,7 +222,12 @@ pub async fn read_cog_meta<S: ByteSource>(source: S) -> Result<CogMeta, MetaErro
             tiles_y,
         });
     }
-    Ok(CogMeta { levels, georef })
+    Ok(CogMeta {
+        levels,
+        georef,
+        num_bands,
+        nodata,
+    })
 }
 
 /// 한 타일의 데이터 bbox — 이미지 경계로 클립, 레벨 픽셀 크기는 크기 비율로 유도.
@@ -213,10 +289,12 @@ mod tests {
     }
 
     fn basic_meta(georef: Option<Georef>) -> CogMeta {
-        // basic_512x512_u16 픽스처와 동형: 레벨0 2x2, 오버뷰 1x1
+        // basic_512x512_u16 픽스처와 동형: 레벨0 2x2, 오버뷰 1x1, 1밴드, nodata 0
         CogMeta {
             levels: vec![level(0, 512, 512, 2, 2), level(1, 256, 256, 1, 1)],
             georef,
+            num_bands: 1,
+            nodata: Some(0.0),
         }
     }
 
@@ -279,6 +357,8 @@ mod tests {
         let meta = CogMeta {
             levels: vec![level(0, 400, 300, 2, 2), level(1, 200, 150, 1, 1)],
             georef: Some(utm52(500000.0, 3800000.0)),
+            num_bands: 1,
+            nodata: Some(0.0),
         };
         let rows: Vec<TileRow> = enumerate_tiles(&meta).collect();
         assert_eq!(
@@ -295,5 +375,85 @@ mod tests {
         );
         // 물리 타일 크기는 클립되지 않는다
         assert!(rows.iter().all(|r| (r.cols, r.rows) == (256, 256)));
+    }
+
+    // ---- RS_ 메타데이터 접근자 재료 (RFC §6.8 Phase 1) ----
+
+    #[test]
+    fn dimension_accessors_read_level0() {
+        let meta = basic_meta(None);
+        assert_eq!(meta.width(), Some(512));
+        assert_eq!(meta.height(), Some(512));
+        let empty = CogMeta {
+            levels: vec![],
+            georef: None,
+            num_bands: 0,
+            nodata: None,
+        };
+        assert_eq!(empty.width(), None);
+        assert_eq!(empty.height(), None);
+    }
+
+    #[test]
+    fn srid_follows_sedona_zero_convention() {
+        // Sedona/PostGIS 관례: SRID 부재 = 0 (crs 컬럼의 NULL 과 다름 — 문서화된 차이)
+        assert_eq!(basic_meta(Some(utm52(0.0, 0.0))).srid(), 32652);
+        assert_eq!(basic_meta(None).srid(), 0);
+        let no_epsg = Georef {
+            epsg: None,
+            ..utm52(0.0, 0.0)
+        };
+        assert_eq!(basic_meta(Some(no_epsg)).srid(), 0);
+    }
+
+    #[test]
+    fn band_nodata_is_one_based_and_null_out_of_range() {
+        let meta = basic_meta(None);
+        assert_eq!(meta.band_nodata(1), Some(0.0));
+        assert_eq!(meta.band_nodata(0), None, "0 은 범위 밖 (1-based)");
+        assert_eq!(meta.band_nodata(2), None, "밴드 1개뿐");
+        // multiband_64x64_u8 픽스처와 동형: 3밴드, nodata 미설정
+        let mb = CogMeta {
+            levels: vec![level(0, 64, 64, 1, 1)],
+            georef: Some(utm52(600000.0, 3900000.0)),
+            num_bands: 3,
+            nodata: None,
+        };
+        assert_eq!(mb.band_nodata(1), None);
+        assert_eq!(mb.band_nodata(3), None);
+        assert_eq!(mb.band_nodata(4), None);
+    }
+
+    #[test]
+    fn gdal_scale_is_negative_y() {
+        let g = utm52(300000.0, 4000000.0);
+        assert_eq!(g.scale_gdal(), (10.0, -10.0));
+        assert_eq!(
+            g.skew(),
+            (0.0, 0.0),
+            "ModelPixelScale+Tiepoint 경로는 skew 없음"
+        );
+    }
+
+    #[test]
+    fn georeference_gdal_text_matches_sqllogictest_expectation() {
+        // test/sql/rs_metadata.test 의 기대값과 동일 문자열 (3중 대조)
+        let meta = basic_meta(Some(utm52(300000.0, 4000000.0)));
+        assert_eq!(
+            meta.georeference_gdal().as_deref(),
+            Some("10.000000\n0.000000\n0.000000\n-10.000000\n300000.000000\n4000000.000000")
+        );
+        assert_eq!(basic_meta(None).georeference_gdal(), None);
+    }
+
+    #[test]
+    fn nodata_string_parsing() {
+        assert_eq!(parse_gdal_nodata("0"), Some(0.0));
+        assert_eq!(parse_gdal_nodata(" -9999 "), Some(-9999.0));
+        assert_eq!(parse_gdal_nodata("1.5"), Some(1.5));
+        assert!(parse_gdal_nodata("nan").is_some_and(f64::is_nan));
+        assert!(parse_gdal_nodata("NaN").is_some_and(f64::is_nan));
+        assert_eq!(parse_gdal_nodata("abc"), None);
+        assert_eq!(parse_gdal_nodata(""), None);
     }
 }

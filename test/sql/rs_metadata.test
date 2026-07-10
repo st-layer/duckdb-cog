@@ -1,0 +1,80 @@
+# name: test/sql/rs_metadata.test
+# description: RS_ 메타데이터 접근자 계약 (RFC §6.8 Phase 1) — Sedona RS_* 규약
+# group: [cog]
+
+# 로드 전에는 함수가 없어야 한다 (파일 불필요)
+statement error
+SELECT RS_Width('x.tif');
+----
+Catalog Error
+
+# require 가 익스텐션을 로드한다
+require cog
+
+# 이하 검증은 생성된 픽스처가 필요 — 없는 환경(배포 CI)에서는 스킵
+require-env COG_TEST_FIXTURES
+
+# ---- 반환 타입 계약 ----
+query TTTTT
+SELECT typeof(RS_Width(f)), typeof(RS_NumBands(f)), typeof(RS_ScaleX(f)), typeof(RS_SRID(f)), typeof(RS_GeoReference(f)) FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+INTEGER	INTEGER	DOUBLE	INTEGER	VARCHAR
+
+query T
+SELECT typeof(RS_MetaData('${COG_TEST_FIXTURES}/basic_512x512_u16.tif'));
+----
+STRUCT(upperleftx DOUBLE, upperlefty DOUBLE, width INTEGER, height INTEGER, scalex DOUBLE, scaley DOUBLE, skewx DOUBLE, skewy DOUBLE, srid INTEGER, numbands INTEGER)
+
+# ---- basic: 값 계약 (rasterio 오라클 test_fixture_basic.py 와 동일 수치) ----
+# ScaleY 는 GDAL north-up 관례로 음수 (-10). 값은 전부 정수 — 정확 비교.
+query IIIIIIIII
+SELECT RS_Width(f), RS_Height(f), RS_NumBands(f), RS_ScaleX(f)::BIGINT, RS_ScaleY(f)::BIGINT, RS_SkewX(f)::BIGINT, RS_SkewY(f)::BIGINT, RS_UpperLeftX(f)::BIGINT, RS_UpperLeftY(f)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+512	512	1	10	-10	0	0	300000	4000000
+
+# SRID + nodata: 1-based 밴드, 기본값 1, 범위 밖 → NULL (에러 아님)
+query IIIII
+SELECT RS_SRID(f), RS_BandNoDataValue(f)::BIGINT, RS_BandNoDataValue(f, 1)::BIGINT, RS_BandNoDataValue(f, 0)::BIGINT, RS_BandNoDataValue(f, 2)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+32652	0	0	NULL	NULL
+
+# GDAL 포맷 6줄 텍스트: scaleX, skewY, skewX, scaleY, upperLeftX, upperLeftY (%.6f)
+query T
+SELECT replace(RS_GeoReference('${COG_TEST_FIXTURES}/basic_512x512_u16.tif'), chr(10), '|');
+----
+10.000000|0.000000|0.000000|-10.000000|300000.000000|4000000.000000
+
+# RS_MetaData 필드값 = 개별 접근자와 동일 정보
+query IIIIIIIIII
+SELECT m.upperleftx::BIGINT, m.upperlefty::BIGINT, m.width, m.height, m.scalex::BIGINT, m.scaley::BIGINT, m.skewx::BIGINT, m.skewy::BIGINT, m.srid, m.numbands FROM (SELECT RS_MetaData('${COG_TEST_FIXTURES}/basic_512x512_u16.tif') AS m);
+----
+300000	4000000	512	512	10	-10	0	0	32652	1
+
+# ---- edge: 다른 origin/크기로 접근자가 파일별 값을 읽는지 판정 ----
+query IIII
+SELECT RS_Width(f), RS_Height(f), RS_UpperLeftX(f)::BIGINT, RS_UpperLeftY(f)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/edge_400x300_u16.tif' AS f);
+----
+400	300	500000	3800000
+
+# ---- multiband: 3밴드, nodata 미설정 → 전 밴드 NULL, 범위 밖(4) NULL ----
+query IIII
+SELECT RS_NumBands(f), RS_BandNoDataValue(f), RS_BandNoDataValue(f, 3), RS_BandNoDataValue(f, 4) FROM (SELECT '${COG_TEST_FIXTURES}/multiband_64x64_u8.tif' AS f);
+----
+3	NULL	NULL	NULL
+
+# ---- NULL 의미론: NULL 인자 → NULL (에러 아님) ----
+query IIR
+SELECT RS_Width(NULL::VARCHAR), RS_SRID(NULL::VARCHAR), RS_BandNoDataValue(NULL::VARCHAR, 1);
+----
+NULL	NULL	NULL
+
+query R
+SELECT RS_BandNoDataValue('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', NULL::INTEGER);
+----
+NULL
+
+# ---- 에러 경로: 없는 파일은 경로를 포함한 에러 ----
+statement error
+SELECT RS_Width('${COG_TEST_FIXTURES}/no_such.tif');
+----
+no_such.tif
