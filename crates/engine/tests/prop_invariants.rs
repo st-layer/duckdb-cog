@@ -157,6 +157,25 @@ proptest! {
     }
 }
 
+proptest! {
+    /// 좌표 왕복 항등 (RFC §6.9 T4): raster→world(좌상단 코너)→raster 는 항등.
+    /// 픽셀 내부 임의 오프셋을 더해도 같은 픽셀로 돌아온다 (floor 격자).
+    #[test]
+    fn coord_roundtrip_is_identity(
+        col in 1i64..100_000, row in 1i64..100_000,
+        ox in -1.0e6f64..1.0e6, oy in -1.0e6f64..1.0e6,
+        px in 0.1f64..100.0, py in 0.1f64..100.0,
+        fx in 0.0f64..0.99, fy in 0.0f64..0.99,
+    ) {
+        let g = Georef { epsg: None, origin_x: ox, origin_y: oy, pixel_x: px, pixel_y: py };
+        let (wx, wy) = g.raster_to_world(col, row);
+        prop_assert_eq!(g.world_to_raster(wx, wy), (col, row), "코너 왕복");
+        // 픽셀 내부 점도 같은 픽셀 (부동소수 경계 오차를 피해 0.99 까지만)
+        let (ix, iy) = (wx + fx * px, wy - fy * py);
+        prop_assert_eq!(g.world_to_raster(ix, iy), (col, row), "내부점 왕복");
+    }
+}
+
 /// 필터 오류 경로 — 예시 기반이 더 명료한 계약들.
 #[test]
 fn bbox_filter_error_paths() {
