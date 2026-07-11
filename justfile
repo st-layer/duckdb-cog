@@ -11,7 +11,8 @@ export PATH := env_var("HOME") / ".cargo/bin:" + env_var("PATH")
 default: check
 
 # 전체 판정 게이트 — 완료 판정의 유일한 기준 (빠른 것부터: HARNESS §2)
-check: fmt clippy test oracle
+# fixtures 가 test 앞: engine 통합테스트(T5 fetch_contract)가 픽스처 파일을 읽는다.
+check: fmt clippy fixtures test oracle
 
 fmt:
     cargo fmt --all -- --check
@@ -37,9 +38,26 @@ ext:
     make debug
 
 # sqllogictest 실행 (test/sql/*.test) — LOAD 포함 E2E
-# COG_TEST_FIXTURES 가 픽스처 의존 테스트를 켠다 (없으면 require-env 가 스킵)
+# COG_TEST_FIXTURES 가 픽스처 의존 테스트를, COG_TEST_HTTP 가 원격(http) 테스트를 켠다.
+# 픽스처를 Range 지원 서버(rangehttpserver)로 서빙 — object_store 는 Range GET 필수.
 ext-test: ext fixtures
-    COG_TEST_FIXTURES=test/data/generated make test_debug
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port=18923
+    (cd test/data/generated && exec uv run --project ../../.. python -m RangeHTTPServer "$port") >/tmp/cog-range-server.log 2>&1 &
+    srv=$!
+    # uv 의 python 자식까지 정리 — 살아남은 자식이 포트를 점유하면 다음 실행이 깨진다
+    trap 'pkill -P "$srv" 2>/dev/null || true; kill "$srv" 2>/dev/null || true' EXIT
+    ready=0
+    for _ in $(seq 50); do
+        curl -sf -o /dev/null "http://127.0.0.1:$port/" && ready=1 && break
+        sleep 0.1
+    done
+    if [ "$ready" != 1 ]; then
+        echo "FAIL: range 서버가 :$port 에서 안 뜸 (포트 점유? /tmp/cog-range-server.log 확인)" >&2
+        exit 1
+    fi
+    COG_TEST_FIXTURES=test/data/generated COG_TEST_HTTP="http://127.0.0.1:$port" make test_debug
 
 # 엔진 wasm32-unknown-unknown 컴파일 판정 (RFC G8) — rustup 환경 필요, CI 상시 실행.
 # macOS: Apple clang 은 wasm 타깃 미지원(zstd-sys C 빌드) — homebrew llvm 이 있으면 사용.

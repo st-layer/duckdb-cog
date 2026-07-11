@@ -2,6 +2,7 @@
 //!
 //! 픽셀은 건드리지 않는다 — IFD 메타데이터만 읽어 read_cog() 의 행을 만든다.
 
+use async_tiff::metadata::cache::ReadaheadMetadataCache;
 use async_tiff::metadata::TiffMetadataReader;
 
 use crate::source::{ByteSource, FetchAdapter};
@@ -157,7 +158,9 @@ impl std::error::Error for MetaError {}
 ///
 /// async-tiff 호출은 여기(와 source.rs 어댑터)에만 존재한다 (RFC R8).
 pub async fn read_cog_meta<S: ByteSource>(source: S) -> Result<CogMeta, MetaError> {
-    let fetch = FetchAdapter(source);
+    // readahead 필수: async-tiff 메타데이터 리더는 태그 단위로 잘게 읽는다 —
+    // 캐시 없이는 나열 한 번에 수백 fetch (T5 fetch_contract 가 회귀 감시).
+    let fetch = ReadaheadMetadataCache::new(FetchAdapter(source));
     let mut reader = TiffMetadataReader::try_open(&fetch)
         .await
         .map_err(|e| MetaError::Tiff(e.to_string()))?;

@@ -1,0 +1,49 @@
+# name: test/sql/read_cog_http.test
+# description: 원격(http) COG — object_store 직행 경로 (RFC §6.5(a)). 로컬과 동일 결과 계약.
+# group: [cog]
+
+require cog
+
+# 로컬 픽스처를 Range 지원 http 서버로 서빙하는 환경에서만 (just ext-test 가 구성)
+require-env COG_TEST_FIXTURES
+
+require-env COG_TEST_HTTP
+
+# 원격 타일 그리드 = 로컬 read_cog.test 과 동일 수치 (전송 계층만 다름)
+query IIIIII
+SELECT id, level, tile_x, tile_y, cols, rows FROM read_cog('${COG_TEST_HTTP}/basic_512x512_u16.tif') ORDER BY level, tile_y, tile_x;
+----
+0	0	0	0	256	256
+16777216	0	1	0	256	256
+1	0	0	1	256	256
+16777217	0	1	1	256	256
+281474976710656	1	0	0	256	256
+
+# bbox/crs 도 로컬과 동일
+query IIT
+SELECT bbox.xmin::BIGINT, bbox.ymax::BIGINT, crs FROM read_cog('${COG_TEST_HTTP}/basic_512x512_u16.tif') WHERE level=0 AND tile_x=0 AND tile_y=0;
+----
+300000	4000000	EPSG:32652
+
+# RS_ 스칼라 접근자도 원격 경로를 받는다
+query IIII
+SELECT RS_Width(f), RS_Height(f), RS_NumBands(f), RS_SRID(f) FROM (SELECT '${COG_TEST_HTTP}/edge_400x300_u16.tif' AS f);
+----
+400	300	1	32652
+
+query I
+SELECT RS_BandNoDataValue('${COG_TEST_HTTP}/basic_512x512_u16.tif')::BIGINT;
+----
+0
+
+# 없는 원격 객체 → 에러 (경로 포함)
+statement error
+SELECT * FROM read_cog('${COG_TEST_HTTP}/no_such.tif');
+----
+no_such.tif
+
+# ---- tiny (<32KiB): 원격 EOF 클램프 (object_store 는 가용 분만 반환) ----
+query II
+SELECT RS_Width(f), RS_UpperLeftX(f)::BIGINT FROM (SELECT '${COG_TEST_HTTP}/tiny_16x16_u8.tif' AS f);
+----
+16	700000
