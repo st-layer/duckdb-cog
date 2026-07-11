@@ -7,7 +7,6 @@ use std::fmt::Debug;
 use std::ops::Range;
 
 use async_tiff::error::{AsyncTiffError, AsyncTiffResult};
-use async_tiff::metadata::MetadataFetch;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 
@@ -67,13 +66,26 @@ impl ByteSource for MemorySource {
     }
 }
 
-/// [`ByteSource`] → async-tiff `MetadataFetch` 어댑터 (engine 내부 전용).
+/// [`ByteSource`] → async-tiff 어댑터 (engine 내부 전용).
+///
+/// 메타데이터 경로(`MetadataFetch`, readahead 캐시에 소유됨)와 픽셀 경로
+/// (`AsyncFileReader`, `CogReader` 가 보유)가 같은 소스를 공유하도록
+/// `Arc` 로 감싼다 — clone 은 참조 복제.
 #[derive(Debug)]
-pub(crate) struct FetchAdapter<S: ByteSource>(pub(crate) S);
+pub(crate) struct FetchAdapter<S: ByteSource>(pub(crate) std::sync::Arc<S>);
 
+impl<S: ByteSource> Clone for FetchAdapter<S> {
+    fn clone(&self) -> Self {
+        Self(std::sync::Arc::clone(&self.0))
+    }
+}
+
+// AsyncFileReader 하나로 픽셀(타일) 경로와 메타데이터 경로를 모두 커버한다 —
+// async-tiff 가 `impl<T: AsyncFileReader> MetadataFetch for T` blanket 을 제공.
+// 메타데이터 쪽은 반드시 readahead 캐시로 감싸 쓴다 (meta::new_metadata_fetch).
 #[async_trait::async_trait]
-impl<S: ByteSource> MetadataFetch for FetchAdapter<S> {
-    async fn fetch(&self, range: Range<u64>) -> AsyncTiffResult<Bytes> {
+impl<S: ByteSource> async_tiff::reader::AsyncFileReader for FetchAdapter<S> {
+    async fn get_bytes(&self, range: Range<u64>) -> AsyncTiffResult<Bytes> {
         self.0
             .fetch(range)
             .await

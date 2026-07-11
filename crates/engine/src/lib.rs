@@ -9,6 +9,8 @@
 #[cfg(feature = "reader")]
 mod meta;
 #[cfg(feature = "reader")]
+mod pixel;
+#[cfg(feature = "reader")]
 mod source;
 
 #[cfg(feature = "reader")]
@@ -16,6 +18,8 @@ pub use meta::{
     enumerate_tiles, enumerate_tiles_filtered, read_cog_meta, CogMeta, Georef, LevelMeta,
     MetaError, TileRow,
 };
+#[cfg(feature = "reader")]
+pub use pixel::{apply_nodata, open_cog, CogReader};
 #[cfg(feature = "reader")]
 pub use source::{ByteSource, MemorySource, SourceError};
 // ByteSource 구현자가 시그니처 타입(Bytes, BoxFuture)과 block_on 을 별도 의존성

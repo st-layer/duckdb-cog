@@ -142,6 +142,8 @@ pub enum MetaError {
     InvalidFilter(String),
     /// georef 없는 COG 에 bbox 필터 — 0행 침묵 대신 명시적 거부.
     FilterWithoutGeoref,
+    /// georef 없는 COG 에 월드 좌표 픽셀 조회 — 좌표 해석 불가.
+    NotGeoreferenced,
 }
 
 impl std::fmt::Display for MetaError {
@@ -159,6 +161,12 @@ impl std::fmt::Display for MetaError {
                     "bbox filter requires a georeferenced COG (no geo tags found)"
                 )
             }
+            MetaError::NotGeoreferenced => {
+                write!(
+                    f,
+                    "coordinate lookup requires a georeferenced COG (no geo tags found)"
+                )
+            }
         }
     }
 }
@@ -167,19 +175,37 @@ impl std::error::Error for MetaError {}
 
 /// COG 메타데이터를 읽어 레벨별 타일 그리드와 georeference 를 구성한다.
 ///
-/// async-tiff 호출은 여기(와 source.rs 어댑터)에만 존재한다 (RFC R8).
+/// async-tiff 호출은 engine 내부(meta/source/pixel)에만 존재한다 (RFC R8).
+/// 픽셀까지 읽을 거면 IFD 를 보관하는 [`crate::open_cog`] 를 쓴다.
 pub async fn read_cog_meta<S: ByteSource>(source: S) -> Result<CogMeta, MetaError> {
-    // readahead 필수: async-tiff 메타데이터 리더는 태그 단위로 잘게 읽는다 —
-    // 캐시 없이는 나열 한 번에 수백 fetch (T5 fetch_contract 가 회귀 감시).
-    let fetch = ReadaheadMetadataCache::new(FetchAdapter(source));
-    let mut reader = TiffMetadataReader::try_open(&fetch)
-        .await
-        .map_err(|e| MetaError::Tiff(e.to_string()))?;
-    let ifds = reader
-        .read_all_ifds(&fetch)
-        .await
-        .map_err(|e| MetaError::Tiff(e.to_string()))?;
+    let fetch = new_metadata_fetch(FetchAdapter(std::sync::Arc::new(source)));
+    let ifds = read_ifds(&fetch).await?;
+    build_meta(&ifds)
+}
 
+/// 메타데이터 fetch 구성 — readahead 필수: async-tiff 리더는 태그 단위로 잘게
+/// 읽어서, 캐시 없이는 나열 한 번에 수백 fetch (T5 fetch_contract 가 회귀 감시).
+pub(crate) fn new_metadata_fetch<S: ByteSource>(
+    adapter: FetchAdapter<S>,
+) -> ReadaheadMetadataCache<FetchAdapter<S>> {
+    ReadaheadMetadataCache::new(adapter)
+}
+
+/// TIFF 를 열어 전체 IFD 체인을 읽는다.
+pub(crate) async fn read_ifds<S: ByteSource>(
+    fetch: &ReadaheadMetadataCache<FetchAdapter<S>>,
+) -> Result<Vec<async_tiff::ImageFileDirectory>, MetaError> {
+    let mut reader = TiffMetadataReader::try_open(fetch)
+        .await
+        .map_err(|e| MetaError::Tiff(e.to_string()))?;
+    reader
+        .read_all_ifds(fetch)
+        .await
+        .map_err(|e| MetaError::Tiff(e.to_string()))
+}
+
+/// 읽어 둔 IFD 체인에서 [`CogMeta`] 를 구성한다 (IO 없음).
+pub(crate) fn build_meta(ifds: &[async_tiff::ImageFileDirectory]) -> Result<CogMeta, MetaError> {
     // 밴드 수·nodata 도 IFD0 기준 (GDAL 관행상 전 밴드 공통)
     let num_bands = ifds
         .first()
