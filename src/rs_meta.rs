@@ -385,6 +385,176 @@ impl VScalar for RsValue {
     }
 }
 
+/// `RS_Values(path, xs DOUBLE[], ys DOUBLE[][, band])` — 배치 픽셀 (위치 보존).
+/// Sedona 는 Point geometry 배열 인자 — 우리는 좌표 배열 쌍 (geometry 타입 부재,
+/// 문서화된 이탈). 리스트 인자 NULL → 결과 NULL, 원소 NULL/extent 밖/nodata →
+/// 그 원소만 NULL, xs·ys 길이 불일치 → 에러.
+struct RsValues;
+
+impl VScalar for RsValues {
+    type State = ();
+
+    fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let paths = input.flat_vector(0);
+        // SAFETY: 컬럼 0 VARCHAR, 1/2 LIST(DOUBLE), 3 INTEGER — signatures() 선언과 일치.
+        let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
+        let xnull = input.flat_vector(1);
+        let ynull = input.flat_vector(2);
+        let xl = input.list_vector(1);
+        let yl = input.list_vector(2);
+        let bands: Vec<Option<i32>> = if input.num_columns() > 3 {
+            let bv = input.flat_vector(3);
+            let raw = unsafe { bv.as_slice_with_len::<i32>(n) };
+            (0..n)
+                .map(|i| (!bv.row_is_null(i as u64)).then(|| raw[i]))
+                .collect()
+        } else {
+            vec![Some(1); n]
+        };
+
+        // 자식 슬라이스는 최대 필요 길이까지 읽는다
+        let max_end = |lv: &duckdb::core::ListVector, null_v: &FlatVector| -> usize {
+            (0..n)
+                .filter(|i| !null_v.row_is_null(*i as u64))
+                .map(|i| {
+                    let (o, l) = lv.get_entry(i);
+                    o + l
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let (xe, ye) = (max_end(&xl, &xnull), max_end(&yl, &ynull));
+        let xchild = xl.child(xe);
+        let ychild = yl.child(ye);
+        let xs = unsafe { xchild.as_slice_with_len::<f64>(xe) };
+        let ys = unsafe { ychild.as_slice_with_len::<f64>(ye) };
+
+        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
+        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        // 행별 결과: None = 리스트 자체 NULL, Some(vec) = 원소별 값
+        let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let band = bands[i].and_then(|b| u32::try_from(b).ok());
+            if paths.row_is_null(i as u64)
+                || xnull.row_is_null(i as u64)
+                || ynull.row_is_null(i as u64)
+                || bands[i].is_none()
+            {
+                rows.push(None);
+                continue;
+            }
+            let (xo, xn) = xl.get_entry(i);
+            let (yo, yn) = yl.get_entry(i);
+            if xn != yn {
+                return Err(format!(
+                    "RS_Values: xs/ys length mismatch ({xn} vs {yn})"
+                )
+                .into());
+            }
+            let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
+            let opened = match cache.get(&path) {
+                Some(o) => Rc::clone(o),
+                None => {
+                    let source = open_source(&path).map_err(|e| format!("RS_Values: {e}"))?;
+                    let o = engine::futures::executor::block_on(engine::open_cog(source))
+                        .map_err(|e| format!("RS_Values: '{path}': {e}"))?;
+                    let o = Rc::new(o);
+                    cache.insert(path.clone(), Rc::clone(&o));
+                    o
+                }
+            };
+            let (meta, reader) = (&opened.0, &opened.1);
+            // 원소 NULL 은 배치에서 제외하고 자리만 보존
+            let mut result = vec![None; xn];
+            let mut points = Vec::with_capacity(xn);
+            let mut idx = Vec::with_capacity(xn);
+            for k in 0..xn {
+                if xchild.row_is_null((xo + k) as u64) || ychild.row_is_null((yo + k) as u64) {
+                    continue;
+                }
+                points.push((xs[xo + k], ys[yo + k]));
+                idx.push(k);
+            }
+            let values = match band {
+                None => vec![None; points.len()],
+                Some(b) => {
+                    engine::futures::executor::block_on(reader.read_pixels(meta, &points, b))
+                        .map_err(|e| format!("RS_Values: '{path}': {e}"))?
+                }
+            };
+            for (k, v) in idx.into_iter().zip(values) {
+                result[k] = v;
+            }
+            rows.push(Some(result));
+        }
+
+        // LIST(DOUBLE) 출력: 자식 평탄화 + entry + 행 NULL (값/NULL 2패스 — 차용 규칙)
+        let mut out = output.list_vector();
+        let mut offsets = Vec::with_capacity(n);
+        let mut total = 0usize;
+        for row in &rows {
+            offsets.push(total);
+            total += row.as_ref().map_or(0, Vec::len);
+        }
+        let mut child = out.child(total);
+        {
+            // SAFETY: 자식은 DOUBLE — f64 표현. total 로 reserve 됨.
+            let slice = unsafe { child.as_mut_slice::<f64>() };
+            for (i, row) in rows.iter().enumerate() {
+                if let Some(vals) = row {
+                    for (k, v) in vals.iter().enumerate() {
+                        if let Some(x) = v {
+                            slice[offsets[i] + k] = *x;
+                        }
+                    }
+                }
+            }
+        }
+        for (i, row) in rows.iter().enumerate() {
+            match row {
+                None => {
+                    out.set_entry(i, offsets[i], 0);
+                    out.set_null(i);
+                }
+                Some(vals) => {
+                    out.set_entry(i, offsets[i], vals.len());
+                    for (k, v) in vals.iter().enumerate() {
+                        if v.is_none() {
+                            child.set_null(offsets[i] + k);
+                        }
+                    }
+                }
+            }
+        }
+        out.set_len(total);
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        let list_d = || LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double));
+        vec![
+            ScalarFunctionSignature::exact(
+                vec![LogicalTypeId::Varchar.into(), list_d(), list_d()],
+                list_d(),
+            ),
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    list_d(),
+                    list_d(),
+                    LogicalTypeId::Integer.into(),
+                ],
+                list_d(),
+            ),
+        ]
+    }
+}
+
 /// `RS_WorldToRasterCoord(path, x, y)` — 월드 좌표 → 1-based 그리드 STRUCT(col, row).
 /// 순수 변환 (경계 검사 없음, Sedona 준거). NULL 인자 → NULL, georef 없음 → 에러.
 struct RsWorldToRasterCoord;
@@ -584,6 +754,7 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     con.register_scalar_function::<RsBandNoDataValue>("RS_BandNoDataValue")?;
     con.register_scalar_function::<RsMetaData>("RS_MetaData")?;
     con.register_scalar_function::<RsValue>("RS_Value")?;
+    con.register_scalar_function::<RsValues>("RS_Values")?;
     con.register_scalar_function::<RsWorldToRasterCoord>("RS_WorldToRasterCoord")?;
     con.register_scalar_function::<RsRasterToWorldCoord>("RS_RasterToWorldCoord")?;
     Ok(())

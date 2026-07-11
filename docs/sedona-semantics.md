@@ -44,6 +44,7 @@ RFC §6.8/R10: Apache Sedona `RS_*` 카탈로그는 **참조이지 계약이 아
 | `RS_Value(path, x DOUBLE, y DOUBLE[, band])` | DOUBLE | extent 밖·범위 밖 밴드·nodata·NULL 인자 → NULL | 인자형 외: level 0 고정 판독, 보간 없음(floor 격자 — 원점 코너는 픽셀 (0,0), 우/하단 경계 좌표는 밖). georef 없는 파일 → 에러 (좌표 해석 불가; bbox 필터와 동일 결정) |
 | `RS_WorldToRasterCoord(path, x, y)` | STRUCT(col, row) INTEGER | NULL 인자 → NULL | 1-based, 순수 변환(경계 검사 없음 — extent 밖도 환산). i32 초과 좌표는 NULL. georef 없음 → 에러 |
 | `RS_RasterToWorldCoord(path, col, row)` | STRUCT(x, y) DOUBLE | NULL 인자 → NULL | 1-based 픽셀의 **좌상단 코너** 좌표. georef 없음 → 에러 |
+| `RS_Values(path, xs DOUBLE[], ys DOUBLE[][, band])` | DOUBLE[] | 리스트 인자 NULL → NULL; 원소 NULL·extent 밖·nodata → 그 원소만 NULL | Sedona 는 Point geometry 배열 — 우리는 좌표 배열 쌍(geometry 타입 부재). xs/ys 길이 불일치 → 에러. 같은 타일 점들은 1회 fetch+decode |
 
 판정: T1 조밀 오라클 (`tests/oracle/test_rs_value_oracle.py`) — multiband 전 픽셀
 중심 ×3밴드 전수 + basic/edge 무작위 300점씩을 rasterio `ds.sample` 과 대조
@@ -51,7 +52,7 @@ RFC §6.8/R10: Apache Sedona `RS_*` 카탈로그는 **참조이지 계약이 아
 
 ## Phase 2 잔여 (미구현)
 
-`RS_Values`, `RS_NormalizedDifference`, `RS_BandAsArray`, `RS_ZonalStats` — RFC §6.8 표 참조. 래스터
+`RS_NormalizedDifference`, `RS_BandAsArray`, `RS_ZonalStats` — RFC §6.8 표 참조. 래스터
 생성/변형 함수군(`RS_MakeRaster`, `RS_Resample` 등)은 명시적 범위 밖 (N3).
 
 ## 판정
