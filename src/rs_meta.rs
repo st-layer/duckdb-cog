@@ -317,9 +317,9 @@ impl VScalar for RsValue {
         // SAFETY: 컬럼 타입은 signatures() 선언(VARCHAR, DOUBLE, DOUBLE[, INTEGER])과 일치.
         let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
         let xv = input.flat_vector(1);
-        let xs = unsafe { xv.as_slice_with_len::<f64>(n) }.to_vec();
+        let xs = unsafe { xv.as_slice_with_len::<f64>(n) };
         let yv = input.flat_vector(2);
-        let ys = unsafe { yv.as_slice_with_len::<f64>(n) }.to_vec();
+        let ys = unsafe { yv.as_slice_with_len::<f64>(n) };
         let bands: Vec<Option<i32>> = if input.num_columns() > 3 {
             let bv = input.flat_vector(3);
             let raw = unsafe { bv.as_slice_with_len::<i32>(n) };
