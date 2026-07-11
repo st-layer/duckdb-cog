@@ -1,0 +1,61 @@
+# name: test/sql/rs_values.test
+# description: RS_Values(path, xs[], ys[][, band]) — 배치 픽셀 (RFC §6.8 Phase 2)
+# group: [cog]
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# 반환 타입: DOUBLE[]
+query T
+SELECT typeof(RS_Values('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300005.0], [3999995.0]));
+----
+DOUBLE[]
+
+# 배치 = 개별 RS_Value 와 동일 값, 위치 보존
+query T
+SELECT RS_Values('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300005.0, 302565.0, 305115.0], [3999995.0, 3997435.0, 3994885.0])::VARCHAR;
+----
+[9864.0, 23907.0, 59212.0]
+
+# 밴드 오버로드 (multiband band 3)
+query T
+SELECT RS_Values('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', [600325.0], [3899675.0], 3)::VARCHAR;
+----
+[51.0]
+
+# extent 밖 원소는 그 자리만 NULL (다른 원소 보존)
+query T
+SELECT RS_Values('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [0.0, 300005.0], [0.0, 3999995.0])::VARCHAR;
+----
+[NULL, 9864.0]
+
+# nodata 구멍 원소 → NULL
+query T
+SELECT RS_Values('${COG_TEST_FIXTURES}/nodatahole_64x64_u16.tif', [900005.0, 900015.0], [3999995.0, 3999995.0])::VARCHAR;
+----
+[NULL, 5849.0]
+
+# 빈 배열 → 빈 배열
+query T
+SELECT RS_Values('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', []::DOUBLE[], []::DOUBLE[])::VARCHAR;
+----
+[]
+
+# xs 원소 NULL → 그 자리 NULL
+query T
+SELECT RS_Values('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [NULL, 300005.0], [3999995.0, 3999995.0])::VARCHAR;
+----
+[NULL, 9864.0]
+
+# 길이 불일치 → 에러
+statement error
+SELECT RS_Values('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [1.0, 2.0], [3.0]);
+----
+length
+
+# 리스트 인자 자체가 NULL → NULL
+query T
+SELECT RS_Values('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', NULL, [1.0]) IS NULL;
+----
+true

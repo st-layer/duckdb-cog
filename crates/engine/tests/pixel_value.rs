@@ -71,3 +71,80 @@ fn nodata_maps_to_none() {
     assert_eq!(engine::apply_nodata(f64::NAN, Some(f64::NAN)), None);
     assert!(engine::apply_nodata(1.5, Some(f64::NAN)).is_some());
 }
+
+/// 배치 읽기: 개별 read_pixel 과 동일 결과 + 위치 보존.
+#[test]
+fn batch_matches_single_reads() {
+    let (meta, reader) = block_on(open_cog(fixture("basic_512x512_u16.tif"))).expect("valid COG");
+    let pts = [
+        (300005.0, 3999995.0),
+        (0.0, 0.0), // extent 밖 → None
+        (302565.0, 3997435.0),
+        (305115.0, 3994885.0),
+    ];
+    let batch = block_on(reader.read_pixels(&meta, &pts, 1)).expect("io ok");
+    assert_eq!(batch.len(), pts.len());
+    for (i, (x, y)) in pts.iter().enumerate() {
+        let single = block_on(reader.read_pixel(&meta, *x, *y, 1)).expect("io ok");
+        assert_eq!(batch[i], single, "위치 {i} 불일치");
+    }
+}
+
+/// T5 스타일 decode 효율 계약: 같은 타일의 점 4096개 배치 → 타일 fetch 는 1회.
+/// (naive 구현은 점마다 fetch+decode — O(points) fetch 가 나오면 회귀)
+#[test]
+fn batch_fetches_each_tile_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct CountingSource {
+        inner: MemorySource,
+        fetches: Arc<AtomicUsize>,
+    }
+    impl engine::ByteSource for CountingSource {
+        fn fetch(
+            &self,
+            range: std::ops::Range<u64>,
+        ) -> engine::futures::future::BoxFuture<
+            '_,
+            Result<engine::bytes::Bytes, engine::SourceError>,
+        > {
+            self.fetches.fetch_add(1, Ordering::Relaxed);
+            self.inner.fetch(range)
+        }
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test/data/generated/multiband_64x64_u8.tif");
+    let raw = std::fs::read(&path).expect("픽스처 없음 — `just fixtures`");
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let source = CountingSource {
+        inner: MemorySource::new(raw),
+        fetches: Arc::clone(&fetches),
+    };
+    let (meta, reader) = block_on(open_cog(source)).expect("valid COG");
+    let meta_fetches = fetches.load(Ordering::Relaxed);
+
+    // 64x64 전 픽셀 중심 — 단일 타일 (256 블록에 패딩된 1타일)
+    let g = meta.georef.clone().expect("georef");
+    let pts: Vec<(f64, f64)> = (0..64)
+        .flat_map(|r| {
+            let g = g.clone();
+            (0..64).map(move |c| {
+                (
+                    g.origin_x + (c as f64 + 0.5) * g.pixel_x,
+                    g.origin_y - (r as f64 + 0.5) * g.pixel_y,
+                )
+            })
+        })
+        .collect();
+    let vals = block_on(reader.read_pixels(&meta, &pts, 1)).expect("io ok");
+    assert_eq!(vals.len(), 4096);
+    assert!(vals.iter().all(|v| v.is_some()), "전 픽셀 값 존재");
+    let tile_fetches = fetches.load(Ordering::Relaxed) - meta_fetches;
+    assert!(
+        tile_fetches <= 2,
+        "타일 fetch {tile_fetches}회 — 4096점 배치가 타일을 반복 fetch (캐시 회귀)"
+    );
+}
