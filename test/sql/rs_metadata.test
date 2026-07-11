@@ -78,3 +78,9 @@ statement error
 SELECT RS_Width('${COG_TEST_FIXTURES}/no_such.tif');
 ----
 no_such.tif
+
+# ---- tiny (<32KiB): readahead 의 EOF 초과 요청을 로컬 소스가 클램프해야 읽힌다 ----
+query IIII
+SELECT RS_Width(f), RS_Height(f), RS_NumBands(f), RS_SRID(f) FROM (SELECT '${COG_TEST_FIXTURES}/tiny_16x16_u8.tif' AS f);
+----
+16	16	1	32652

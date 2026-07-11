@@ -17,12 +17,12 @@ use duckdb::Connection;
 
 // crate:: 가 아니라 super:: — wasm 우회 빌드(example)에선 lib.rs 가 크레이트
 // 루트가 아니므로 부모 모듈 상대 참조만 양쪽에서 성립한다.
-use super::FileSource;
+use super::open_source;
 
 /// 경로 하나의 IFD 메타데이터 읽기 — read_cog bind 와 동일 경로 (픽셀 미접촉).
+/// 로컬/원격 스킴 디스패치는 [`super::open_source`] 공용.
 fn read_meta(fn_name: &str, path: &str) -> Result<engine::CogMeta, Box<dyn Error>> {
-    let source =
-        FileSource::open(path).map_err(|e| format!("{fn_name}: cannot open '{path}': {e}"))?;
+    let source = open_source(path).map_err(|e| format!("{fn_name}: {e}"))?;
     Ok(
         engine::futures::executor::block_on(engine::read_cog_meta(source))
             .map_err(|e| format!("{fn_name}: '{path}': {e}"))?,
