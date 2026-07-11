@@ -138,6 +138,10 @@ pub enum MetaError {
     KeyOverflow(String),
     /// TIFF 파싱 실패 (async-tiff 에러 문자열).
     Tiff(String),
+    /// bbox 필터가 유효하지 않다 (역전·비유한값).
+    InvalidFilter(String),
+    /// georef 없는 COG 에 bbox 필터 — 0행 침묵 대신 명시적 거부.
+    FilterWithoutGeoref,
 }
 
 impl std::fmt::Display for MetaError {
@@ -148,6 +152,13 @@ impl std::fmt::Display for MetaError {
             }
             MetaError::KeyOverflow(msg) => write!(f, "tile key overflow: {msg}"),
             MetaError::Tiff(msg) => write!(f, "TIFF read error: {msg}"),
+            MetaError::InvalidFilter(msg) => write!(f, "invalid bbox filter: {msg}"),
+            MetaError::FilterWithoutGeoref => {
+                write!(
+                    f,
+                    "bbox filter requires a georeferenced COG (no geo tags found)"
+                )
+            }
         }
     }
 }
@@ -247,6 +258,36 @@ fn tile_bbox(g: &Georef, base: (f64, f64), l: &LevelMeta, tx: u32, ty: u32) -> [
         g.origin_x + px_max * sx,
         g.origin_y - py_min * sy,
     ]
+}
+
+/// 닫힌 구간 bbox 교차 (경계 접촉 포함) — §6.6 pruning 의 판정 술어.
+fn bbox_intersects(a: &[f64; 4], b: &[f64; 4]) -> bool {
+    a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1]
+}
+
+/// [`enumerate_tiles`] 에 bbox 필터를 적용한다 (RFC §6.6 pruning).
+///
+/// 계약 (T4 성질로 고정): 결과 = 전체 열거 후 닫힌 교차 필터와 동일 집합.
+/// 퇴화(점/선) bbox 허용. georef 없는 COG 에 필터를 주면 0행 침묵 대신 에러.
+pub fn enumerate_tiles_filtered(
+    meta: &CogMeta,
+    filter: Option<[f64; 4]>,
+) -> Result<Vec<TileRow>, MetaError> {
+    let Some(f) = filter else {
+        return Ok(enumerate_tiles(meta).collect());
+    };
+    if !f.iter().all(|v| v.is_finite()) || f[0] > f[2] || f[1] > f[3] {
+        return Err(MetaError::InvalidFilter(format!(
+            "[{}, {}, {}, {}] — 유한값이며 xmin<=xmax, ymin<=ymax 여야 한다",
+            f[0], f[1], f[2], f[3]
+        )));
+    }
+    if meta.georef.is_none() {
+        return Err(MetaError::FilterWithoutGeoref);
+    }
+    Ok(enumerate_tiles(meta)
+        .filter(|r| r.bbox.is_some_and(|b| bbox_intersects(&b, &f)))
+        .collect())
 }
 
 /// 레벨→행(y)→열(x) 순서로 전 타일을 나열한다. id 는 [`pack_tile_key`].

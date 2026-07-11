@@ -266,13 +266,33 @@ impl VTab for ReadCogVTab {
         bind.add_result_column("crs", LogicalTypeHandle::from(LogicalTypeId::Varchar));
 
         let path = bind.get_parameter(0).to_string();
+        // bbox := [xmin, ymin, xmax, ymax] — 유효성·교차 의미론은 engine 에 (§6.6)
+        let filter = match bind.get_named_parameter("bbox") {
+            None => None,
+            Some(v) if v.is_null() => None,
+            Some(v) => {
+                let items = v
+                    .to_list()
+                    .ok_or("read_cog: bbox must be a list of 4 doubles")?;
+                if items.len() != 4 {
+                    return Err(format!(
+                        "read_cog: bbox must have exactly 4 elements [xmin, ymin, xmax, ymax], got {}",
+                        items.len()
+                    )
+                    .into());
+                }
+                let f: Vec<f64> = items.iter().map(|x| x.to_double()).collect();
+                Some([f[0], f[1], f[2], f[3]])
+            }
+        };
         let source = open_source(&path).map_err(|e| format!("read_cog: {e}"))?;
         // 원격 IO 는 소스 내부에서 tokio 런타임에 스폰되므로, 여기 block_on 은
         // JoinHandle(로컬은 즉시 완료 future)만 폴링한다 — 전용 executor 불필요.
         let meta = engine::futures::executor::block_on(engine::read_cog_meta(source))
             .map_err(|e| format!("read_cog: '{path}': {e}"))?;
         Ok(ReadCogBindData {
-            tiles: engine::enumerate_tiles(&meta).collect(),
+            tiles: engine::enumerate_tiles_filtered(&meta, filter)
+                .map_err(|e| format!("read_cog: '{path}': {e}"))?,
             crs: meta.crs().map(std::ffi::CString::new).transpose()?,
         })
     }
@@ -359,6 +379,13 @@ impl VTab for ReadCogVTab {
 
     fn parameters() -> Option<Vec<LogicalTypeHandle>> {
         Some(vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)])
+    }
+
+    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        Some(vec![(
+            "bbox".to_string(),
+            LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double)),
+        )])
     }
 }
 
