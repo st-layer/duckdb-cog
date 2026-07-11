@@ -1,0 +1,72 @@
+# name: test/sql/rs_value.test
+# description: RS_Value(path, x, y[, band]) — 픽셀 접근 (RFC §6.8 Phase 2, T1 오라클 수치)
+# group: [cog]
+
+statement error
+SELECT RS_Value('x.tif', 0.0, 0.0);
+----
+Catalog Error
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# 반환 타입
+query T
+SELECT typeof(RS_Value('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', 300005.0, 3999995.0));
+----
+DOUBLE
+
+# basic: 첫/중앙/마지막 픽셀 중심 — rasterio 오라클 수치 (uint16, 정수 정확)
+query III
+SELECT RS_Value(f, 300005.0, 3999995.0)::BIGINT, RS_Value(f, 302565.0, 3997435.0)::BIGINT, RS_Value(f, 305115.0, 3994885.0)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+9864	23907	59212
+
+# edge: 클립 픽스처 첫/마지막 픽셀
+query II
+SELECT RS_Value(f, 500005.0, 3799995.0)::BIGINT, RS_Value(f, 503995.0, 3797005.0)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/edge_400x300_u16.tif' AS f);
+----
+9864	22749
+
+# multiband: 1-based 밴드 오버로드, 기본 밴드 = 1
+query IIII
+SELECT RS_Value(f, 600325.0, 3899675.0)::BIGINT, RS_Value(f, 600325.0, 3899675.0, 1)::BIGINT, RS_Value(f, 600325.0, 3899675.0, 2)::BIGINT, RS_Value(f, 600325.0, 3899675.0, 3)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/multiband_64x64_u8.tif' AS f);
+----
+191	191	110	51
+
+# 범위 밖 밴드 → NULL (에러 아님)
+query II
+SELECT RS_Value(f, 600325.0, 3899675.0, 0), RS_Value(f, 600325.0, 3899675.0, 4) FROM (SELECT '${COG_TEST_FIXTURES}/multiband_64x64_u8.tif' AS f);
+----
+NULL	NULL
+
+# extent 밖 → NULL: 좌/우/상/하 경계 바로 밖 (우측 경계 xmax=305120 자체도 밖 — 픽셀 중심 규약 아님, floor 격자)
+query IIII
+SELECT RS_Value(f, 299999.9, 3999995.0), RS_Value(f, 305120.0, 3999995.0), RS_Value(f, 300005.0, 4000000.1), RS_Value(f, 300005.0, 3994879.9) FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+NULL	NULL	NULL	NULL
+
+# 원점(xmin, ymax 코너)은 픽셀 (0,0) 에 속한다
+query I
+SELECT RS_Value(f, 300000.0, 4000000.0)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+9864
+
+# tiny (<32KiB, readahead EOF 클램프 경로에서도 픽셀 읽기)
+query I
+SELECT RS_Value(f, 700155.0, 3949845.0)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/tiny_16x16_u8.tif' AS f);
+----
+247
+
+# NULL 인자 → NULL
+query III
+SELECT RS_Value(NULL::VARCHAR, 0.0, 0.0), RS_Value('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', NULL::DOUBLE, 3999995.0), RS_Value('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', 300005.0, 3999995.0, NULL::INTEGER);
+----
+NULL	NULL	NULL
+
+# 없는 파일 → 경로 포함 에러
+statement error
+SELECT RS_Value('${COG_TEST_FIXTURES}/no_such.tif', 0.0, 0.0);
+----
+no_such.tif

@@ -21,4 +21,8 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: cog
       extra_toolchains: rust;python3
-      exclude_archs: 'linux_amd64_musl'
+      # windows_amd64_mingw: 템플릿 mingw 잡이 C(zstd-sys)는 gcc 로 컴파일하고
+      # 링크는 MSVC link.exe 로 해 ___chkstk_ms 미해결 — decode 경로가 zstd 를
+      # 실제 참조하기 시작하며 표면화 (async-tiff 의 zstd 는 비선택 의존이라
+      # feature 로 못 끔). mingw 배포는 R 클라이언트용 — 현 단계 미대상.
+      exclude_archs: 'linux_amd64_musl;windows_amd64_mingw'

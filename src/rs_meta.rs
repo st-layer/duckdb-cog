@@ -300,6 +300,91 @@ impl VScalar for RsMetaData {
     }
 }
 
+/// `RS_Value(path, x, y[, band])` — level 0 월드 좌표 픽셀값 (RFC §6.8 Phase 2).
+/// extent 밖·범위 밖 밴드·nodata·NULL 인자 → NULL. 보간 없음 (floor 격자, N2).
+struct RsValue;
+
+impl VScalar for RsValue {
+    type State = ();
+
+    fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let paths = input.flat_vector(0);
+        // SAFETY: 컬럼 타입은 signatures() 선언(VARCHAR, DOUBLE, DOUBLE[, INTEGER])과 일치.
+        let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
+        let xv = input.flat_vector(1);
+        let xs = unsafe { xv.as_slice_with_len::<f64>(n) };
+        let yv = input.flat_vector(2);
+        let ys = unsafe { yv.as_slice_with_len::<f64>(n) };
+        let bands: Vec<Option<i32>> = if input.num_columns() > 3 {
+            let bv = input.flat_vector(3);
+            let raw = unsafe { bv.as_slice_with_len::<i32>(n) };
+            (0..n)
+                .map(|i| (!bv.row_is_null(i as u64)).then(|| raw[i]))
+                .collect()
+        } else {
+            vec![Some(1); n]
+        };
+
+        // 청크 내 경로 dedupe — 파일당 open(메타 IFD 읽기) 1회, 픽셀은 행마다.
+        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
+        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let band = bands[i].and_then(|b| u32::try_from(b).ok());
+            if paths.row_is_null(i as u64)
+                || xv.row_is_null(i as u64)
+                || yv.row_is_null(i as u64)
+                || bands[i].is_none()
+            {
+                rows.push(None);
+                continue;
+            }
+            let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
+            let opened = match cache.get(&path) {
+                Some(o) => Rc::clone(o),
+                None => {
+                    let source =
+                        open_source(&path).map_err(|e| format!("RS_Value: {e}"))?;
+                    let o = engine::futures::executor::block_on(engine::open_cog(source))
+                        .map_err(|e| format!("RS_Value: '{path}': {e}"))?;
+                    let o = Rc::new(o);
+                    cache.insert(path.clone(), Rc::clone(&o));
+                    o
+                }
+            };
+            let (meta, reader) = (&opened.0, &opened.1);
+            let value = match band {
+                // 음수 밴드는 u32 변환 실패 → 범위 밖과 동일하게 NULL
+                None => None,
+                Some(b) => engine::futures::executor::block_on(
+                    reader.read_pixel(meta, xs[i], ys[i], b),
+                )
+                .map_err(|e| format!("RS_Value: '{path}': {e}"))?,
+            };
+            rows.push(value);
+        }
+        write_values(&mut output.flat_vector(), &rows);
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        let (v, d, i) = (
+            || LogicalTypeHandle::from(LogicalTypeId::Varchar),
+            || LogicalTypeHandle::from(LogicalTypeId::Double),
+            || LogicalTypeHandle::from(LogicalTypeId::Integer),
+        );
+        vec![
+            ScalarFunctionSignature::exact(vec![v(), d(), d()], d()),
+            ScalarFunctionSignature::exact(vec![v(), d(), d(), i()], d()),
+        ]
+    }
+}
+
 /// RS_* 전 함수 등록 — extension_entrypoint 에서 호출.
 pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     let int_fns: [MetaFn<i32>; 4] = [
@@ -361,5 +446,6 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     )?;
     con.register_scalar_function::<RsBandNoDataValue>("RS_BandNoDataValue")?;
     con.register_scalar_function::<RsMetaData>("RS_MetaData")?;
+    con.register_scalar_function::<RsValue>("RS_Value")?;
     Ok(())
 }
