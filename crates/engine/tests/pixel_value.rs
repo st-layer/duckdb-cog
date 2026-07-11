@@ -218,9 +218,10 @@ fn band_window_contract() {
 
     let (meta, reader) =
         block_on(open_cog(fixture("nodatahole_64x64_u16.tif"))).expect("valid COG");
-    let w = block_on(reader.band_window(&meta, Some([900000.0, 3999980.0, 900020.0, 4000000.0]), 1))
-        .expect("io ok")
-        .expect("밴드 유효");
+    let w =
+        block_on(reader.band_window(&meta, Some([900000.0, 3999980.0, 900020.0, 4000000.0]), 1))
+            .expect("io ok")
+            .expect("밴드 유효");
     assert_eq!(w, vec![None, Some(5849.0), Some(14370.0), Some(6038.0)]);
     // 교차 없음 → 빈 배열
     let empty = block_on(reader.band_window(&meta, Some([0.0, 0.0, 1.0, 1.0]), 1))

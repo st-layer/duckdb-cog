@@ -9,7 +9,9 @@ use async_tiff::decoder::DecoderRegistry;
 use async_tiff::tags::PlanarConfiguration;
 use async_tiff::{Array, ImageFileDirectory, TypedArray};
 
-use crate::meta::{build_meta, new_metadata_fetch, read_ifds, CogMeta, MetaError};
+use crate::meta::{
+    build_meta, new_metadata_fetch, read_ifds, CogMeta, Georef, LevelMeta, MetaError,
+};
 use crate::source::{ByteSource, FetchAdapter};
 
 /// 열린 COG 핸들 — IFD 체인을 보관해 픽셀 fetch 에 재사용한다.
@@ -175,20 +177,9 @@ impl<S: ByteSource> CogReader<S> {
         if band == 0 || band > meta.num_bands {
             return Ok(empty);
         }
-        // 중심 포함 규약: center(col) = ox + (col+0.5)px ∈ [xmin, xmax]
-        let col_min = ((bbox[0] - g.origin_x) / g.pixel_x - 0.5).ceil().max(0.0);
-        let col_max = ((bbox[2] - g.origin_x) / g.pixel_x - 0.5)
-            .floor()
-            .min(l0.image_width as f64 - 1.0);
-        let row_min = ((g.origin_y - bbox[3]) / g.pixel_y - 0.5).ceil().max(0.0);
-        let row_max = ((g.origin_y - bbox[1]) / g.pixel_y - 0.5)
-            .floor()
-            .min(l0.image_height as f64 - 1.0);
-        if col_min > col_max || row_min > row_max {
+        let Some((col_min, col_max, row_min, row_max)) = center_window(g, l0, bbox) else {
             return Ok(empty);
-        }
-        let (col_min, col_max) = (col_min as u64, col_max as u64);
-        let (row_min, row_max) = (row_min as u64, row_max as u64);
+        };
 
         // 영역이 걸치는 타일들 — 각 1회 fetch(병합)+decode 후 부분 순회
         let (tw, th) = (l0.tile_width as u64, l0.tile_height as u64);
@@ -239,6 +230,111 @@ impl<S: ByteSource> CogReader<S> {
         }
         Ok(acc)
     }
+
+    /// 밴드를 row-major `Vec<Option<f64>>` 로 읽는다 (RS_BandAsArray 재료).
+    ///
+    /// `bbox: None` = 전체 level 0 밴드 (georef 불요 — 좌표 해석이 없다).
+    /// `bbox: Some` = 픽셀 중심 포함 윈도 (zonal 과 동일 규약; georef 필요).
+    /// 범위 밖 밴드 → `Ok(None)` (SQL NULL — 빈 배열과 구분). nodata → None 원소.
+    pub async fn band_window(
+        &self,
+        meta: &CogMeta,
+        bbox: Option<[f64; 4]>,
+        band: u32,
+    ) -> Result<Option<Vec<Option<f64>>>, MetaError> {
+        let (Some(l0), Some(ifd0)) = (meta.levels.first(), self.ifds.first()) else {
+            return Ok(None);
+        };
+        if band == 0 || band > meta.num_bands {
+            return Ok(None);
+        }
+        let (col_min, col_max, row_min, row_max) = match bbox {
+            None => (0, l0.image_width as u64 - 1, 0, l0.image_height as u64 - 1),
+            Some(b) => {
+                if !b.iter().all(|v| v.is_finite()) || b[0] > b[2] || b[1] > b[3] {
+                    return Err(MetaError::InvalidFilter(format!(
+                        "[{}, {}, {}, {}] must be finite with xmin<=xmax and ymin<=ymax",
+                        b[0], b[1], b[2], b[3]
+                    )));
+                }
+                let Some(g) = &meta.georef else {
+                    return Err(MetaError::NotGeoreferenced);
+                };
+                match center_window(g, l0, b) {
+                    None => return Ok(Some(Vec::new())),
+                    Some(w) => w,
+                }
+            }
+        };
+        let width = (col_max - col_min + 1) as usize;
+        let height = (row_max - row_min + 1) as usize;
+        let mut out: Vec<Option<f64>> = vec![None; width * height];
+
+        let (tw, th) = (l0.tile_width as u64, l0.tile_height as u64);
+        let mut tiles = Vec::new();
+        for ty in (row_min / th)..=(row_max / th) {
+            for tx in (col_min / tw)..=(col_max / tw) {
+                tiles.push((tx as usize, ty as usize));
+            }
+        }
+        let fetched = ifd0
+            .fetch_tiles(&tiles, &self.fetch)
+            .await
+            .map_err(|e| MetaError::Tiff(e.to_string()))?;
+        let planar = ifd0.planar_configuration();
+        for ((tx, ty), tile) in tiles.iter().zip(fetched) {
+            let array = tile
+                .decode(&self.decoders)
+                .map_err(|e| MetaError::Tiff(e.to_string()))?;
+            let (tx0, ty0) = (*tx as u64 * tw, *ty as u64 * th);
+            let r0 = row_min.max(ty0) - ty0;
+            let r1 = row_max.min(ty0 + th - 1) - ty0;
+            let c0 = col_min.max(tx0) - tx0;
+            let c1 = col_max.min(tx0 + tw - 1) - tx0;
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    let value = sample_array(
+                        &array,
+                        planar,
+                        r as usize,
+                        c as usize,
+                        (band - 1) as usize,
+                    )
+                    .ok_or_else(|| {
+                        MetaError::Tiff(format!(
+                            "decoded tile shape {:?} does not contain pixel (row {r}, col {c}, band {band})",
+                            array.shape(),
+                        ))
+                    })?;
+                    let gi = ((ty0 + r - row_min) * width as u64 + (tx0 + c - col_min)) as usize;
+                    out[gi] = apply_nodata(value, meta.nodata);
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+}
+
+/// bbox(중심 포함, 닫힌 구간) → level0 픽셀 창 (col_min, col_max, row_min, row_max).
+/// 이미지와 교차하지 않으면 None. center(col) = ox + (col+0.5)·px ∈ [xmin, xmax].
+fn center_window(g: &Georef, l0: &LevelMeta, bbox: [f64; 4]) -> Option<(u64, u64, u64, u64)> {
+    let col_min = ((bbox[0] - g.origin_x) / g.pixel_x - 0.5).ceil().max(0.0);
+    let col_max = ((bbox[2] - g.origin_x) / g.pixel_x - 0.5)
+        .floor()
+        .min(l0.image_width as f64 - 1.0);
+    let row_min = ((g.origin_y - bbox[3]) / g.pixel_y - 0.5).ceil().max(0.0);
+    let row_max = ((g.origin_y - bbox[1]) / g.pixel_y - 0.5)
+        .floor()
+        .min(l0.image_height as f64 - 1.0);
+    if col_min > col_max || row_min > row_max {
+        return None;
+    }
+    Some((
+        col_min as u64,
+        col_max as u64,
+        row_min as u64,
+        row_max as u64,
+    ))
 }
 
 /// bbox 영역 집계 결과 (RS_ZonalStats 재료). mean 은 sum/count 로 유도.

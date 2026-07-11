@@ -635,6 +635,140 @@ impl VScalar for RsValues {
     }
 }
 
+/// `RS_BandAsArray(path, band[, bbox DOUBLE[]])` — 밴드를 row-major DOUBLE[] 로.
+/// bbox 없으면 전체 level 0 밴드(georef 불요), 있으면 픽셀 중심 포함 윈도.
+/// nodata → NULL 원소. 범위 밖 밴드·NULL 인자 → NULL (빈 배열과 구분).
+struct RsBandAsArray;
+
+impl VScalar for RsBandAsArray {
+    type State = ();
+
+    fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let paths = input.flat_vector(0);
+        // SAFETY: 컬럼 타입은 signatures() 선언(V, I[, LIST(DOUBLE)])과 일치.
+        let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
+        let bandv = input.flat_vector(1);
+        let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
+        let has_bbox = input.num_columns() > 2;
+
+        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
+        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if paths.row_is_null(i as u64) || bandv.row_is_null(i as u64) {
+                rows.push(None);
+                continue;
+            }
+            let bbox = if has_bbox {
+                let bnull = input.flat_vector(2);
+                if bnull.row_is_null(i as u64) {
+                    rows.push(None);
+                    continue;
+                }
+                let bl = input.list_vector(2);
+                let (bo, bn) = bl.get_entry(i);
+                if bn != 4 {
+                    return Err(format!(
+                        "RS_BandAsArray: bbox must have exactly 4 elements, got {bn}"
+                    )
+                    .into());
+                }
+                let bchild = bl.child(bo + bn);
+                if (0..4).any(|k| bchild.row_is_null((bo + k) as u64)) {
+                    rows.push(None);
+                    continue;
+                }
+                let bv = unsafe { bchild.as_slice_with_len::<f64>(bo + bn) };
+                Some([bv[bo], bv[bo + 1], bv[bo + 2], bv[bo + 3]])
+            } else {
+                None
+            };
+            let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
+            let opened = match cache.get(&path) {
+                Some(o) => Rc::clone(o),
+                None => {
+                    let source =
+                        open_source(&path).map_err(|e| format!("RS_BandAsArray: {e}"))?;
+                    let o = engine::futures::executor::block_on(engine::open_cog(source))
+                        .map_err(|e| format!("RS_BandAsArray: '{path}': {e}"))?;
+                    let o = Rc::new(o);
+                    cache.insert(path.clone(), Rc::clone(&o));
+                    o
+                }
+            };
+            let (meta, reader) = (&opened.0, &opened.1);
+            let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → NULL
+            let win = engine::futures::executor::block_on(reader.band_window(meta, bbox, band))
+                .map_err(|e| format!("RS_BandAsArray: '{path}': {e}"))?;
+            rows.push(win);
+        }
+
+        // LIST(DOUBLE) 출력 — RsValues 와 동일 2패스
+        let mut out = output.list_vector();
+        let mut offsets = Vec::with_capacity(n);
+        let mut total = 0usize;
+        for row in &rows {
+            offsets.push(total);
+            total += row.as_ref().map_or(0, Vec::len);
+        }
+        let mut child = out.child(total);
+        {
+            // SAFETY: 자식은 DOUBLE — f64 표현. total 로 reserve 됨.
+            let slice = unsafe { child.as_mut_slice::<f64>() };
+            for (i, row) in rows.iter().enumerate() {
+                if let Some(vals) = row {
+                    for (k, v) in vals.iter().enumerate() {
+                        if let Some(x) = v {
+                            slice[offsets[i] + k] = *x;
+                        }
+                    }
+                }
+            }
+        }
+        for (i, row) in rows.iter().enumerate() {
+            match row {
+                None => {
+                    out.set_entry(i, offsets[i], 0);
+                    out.set_null(i);
+                }
+                Some(vals) => {
+                    out.set_entry(i, offsets[i], vals.len());
+                    for (k, v) in vals.iter().enumerate() {
+                        if v.is_none() {
+                            child.set_null(offsets[i] + k);
+                        }
+                    }
+                }
+            }
+        }
+        out.set_len(total);
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        let list_d = || LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double));
+        vec![
+            ScalarFunctionSignature::exact(
+                vec![LogicalTypeId::Varchar.into(), LogicalTypeId::Integer.into()],
+                list_d(),
+            ),
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
+                    list_d(),
+                ],
+                list_d(),
+            ),
+        ]
+    }
+}
+
 /// `RS_ZonalStats(path, bbox DOUBLE[], band, stat)` — bbox 영역 집계 (RFC §6.8).
 /// zone 은 geometry 가 아니라 bbox (GEOS 비링크 N4 하의 적응, 문서화 이탈).
 /// stat ∈ {count, sum, mean, min, max} (대소문자 무관). 유효 픽셀 없으면
@@ -947,6 +1081,7 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     con.register_scalar_function::<RsValues>("RS_Values")?;
     con.register_scalar_function::<RsNormalizedDifference>("RS_NormalizedDifference")?;
     con.register_scalar_function::<RsZonalStats>("RS_ZonalStats")?;
+    con.register_scalar_function::<RsBandAsArray>("RS_BandAsArray")?;
     con.register_scalar_function::<RsWorldToRasterCoord>("RS_WorldToRasterCoord")?;
     con.register_scalar_function::<RsRasterToWorldCoord>("RS_RasterToWorldCoord")?;
     Ok(())
