@@ -151,7 +151,10 @@ fn batch_fetches_each_tile_once() {
 #[test]
 fn normalized_difference_contract() {
     use engine::normalized_difference as nd;
-    assert_eq!(nd(Some(191.0), Some(110.0)), Some((110.0 - 191.0) / (110.0 + 191.0)));
+    assert_eq!(
+        nd(Some(191.0), Some(110.0)),
+        Some((110.0 - 191.0) / (110.0 + 191.0))
+    );
     assert_eq!(nd(Some(5.0), Some(5.0)), Some(0.0));
     assert_eq!(nd(Some(0.0), Some(0.0)), None, "합 0 → 정의 불가");
     assert_eq!(nd(Some(-3.0), Some(3.0)), None, "합 0 (부호 상쇄)");
