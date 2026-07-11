@@ -1,0 +1,62 @@
+# name: test/sql/read_cog_bbox.test
+# description: read_cog bbox 필터 (RFC §6.6 pruning) — pushdown 결과 = 전체 스캔 후 필터
+# group: [cog]
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# basic: extent x 300000..305120, y 3994880..4000000 (level0 2x2 + 오버뷰 1)
+
+# 전체 extent 를 덮는 bbox → 필터 없음과 동일 (5행)
+query I
+SELECT count(*) FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', bbox := [300000.0, 3994880.0, 305120.0, 4000000.0]);
+----
+5
+
+# 좌상단 타일 내부에 완전히 들어가는 bbox → level0 (0,0) + 전범위 오버뷰 = 2행
+query III
+SELECT level, tile_x, tile_y FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', bbox := [300100.0, 3997500.0, 302000.0, 3999000.0]) ORDER BY level;
+----
+0	0	0
+1	0	0
+
+# 경계 접촉은 포함 (닫힌 교차): 타일 경계선(x=302560) 위의 퇴화 bbox → 전 타일 + 오버뷰
+query I
+SELECT count(*) FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', bbox := [302560.0, 3994880.0, 302560.0, 4000000.0]);
+----
+5
+
+# extent 밖 → 0행 (오버뷰 포함 아무 것도 교차하지 않음)
+query I
+SELECT count(*) FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', bbox := [0.0, 0.0, 100.0, 100.0]);
+----
+0
+
+# pushdown 결과 = 전체 스캔 후 필터 (RFC §6.9 T4 성질의 E2E 판정)
+query I
+SELECT count(*) = (
+    SELECT count(*) FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif')
+    WHERE bbox.xmin <= 303000.0 AND bbox.xmax >= 301000.0
+      AND bbox.ymin <= 3999000.0 AND bbox.ymax >= 3996000.0
+) FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', bbox := [301000.0, 3996000.0, 303000.0, 3999000.0]);
+----
+true
+
+# NULL bbox → 필터 없음과 동일
+query I
+SELECT count(*) FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', bbox := NULL);
+----
+5
+
+# 원소 4개가 아니면 에러
+statement error
+SELECT * FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', bbox := [1.0, 2.0, 3.0]);
+----
+bbox
+
+# min > max 역전이면 에러
+statement error
+SELECT * FROM read_cog('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', bbox := [305120.0, 3994880.0, 300000.0, 4000000.0]);
+----
+bbox
