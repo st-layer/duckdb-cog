@@ -87,3 +87,23 @@ def test_band_out_of_range_is_null(con):
     path = GEN / "multiband_64x64_u8.tif"
     assert sql_values(con, path, [(600325.0, 3899675.0)], band=4) == [None]
     assert sql_values(con, path, [(600325.0, 3899675.0)], band=0) == [None]
+
+
+def test_rs_values_batch_matches_rasterio(con):
+    """RS_Values 한 호출로 전 픽셀 중심 배치 — 개별 RS_Value 와 동일 경로 검증."""
+    path = GEN / "multiband_64x64_u8.tif"
+    with rasterio.open(path) as ds:
+        t = ds.transform
+        pts = [
+            (t.c + (c + 0.5) * t.a, t.f + (r + 0.5) * t.e)
+            for r in range(ds.height)
+            for c in range(ds.width)
+        ]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        for band in (1, 2, 3):
+            expected = rio_values(ds, pts, band - 1)
+            (actual,) = con.execute(
+                f"SELECT RS_Values('{path}', ?, ?, {band})", [xs, ys]
+            ).fetchone()
+            assert actual == pytest.approx(expected), f"band {band} 배치 불일치"

@@ -32,7 +32,8 @@ Early Phase 1 — the metadata surface is functional; pixel access is next.
 | `RS_*` metadata accessors (Width/Height/NumBands/Scale/Skew/UpperLeft/SRID/BandNoDataValue/MetaData/GeoReference) | ✅ |
 | Lazy IO contract (metadata listing ≤ a few range GETs, pixels untouched) | ✅ tested |
 | `RS_Value(path, x, y[, band])` pixel access (level 0, no interpolation, rasterio-verified) | ✅ |
-| `RS_Values`, band math (`RS_NormalizedDifference`), zonal stats | Phase 2 |
+| `RS_Values` batch pixel access (per-tile single fetch+decode) | ✅ |
+| Band math (`RS_NormalizedDifference`), zonal stats | Phase 2 |
 | `read_stac()` | Phase 2 |
 
 ## SQL surface
@@ -62,7 +63,9 @@ unknown.
 
 `RS_Width` · `RS_Height` · `RS_NumBands` · `RS_ScaleX/Y` · `RS_SkewX/Y` ·
 `RS_UpperLeftX/Y` · `RS_SRID` · `RS_BandNoDataValue(path[, band])` ·
-`RS_MetaData` (named STRUCT) · `RS_GeoReference` (GDAL 6-line text)
+`RS_MetaData` (named STRUCT) · `RS_GeoReference` (GDAL 6-line text) ·
+`RS_Value(path, x, y[, band])` · `RS_Values(path, xs[], ys[][, band])` ·
+`RS_WorldToRasterCoord` / `RS_RasterToWorldCoord` (1-based)
 
 ### Remote sources
 

@@ -51,54 +51,96 @@ impl<S: ByteSource> CogReader<S> {
         y: f64,
         band: u32,
     ) -> Result<Option<f64>, MetaError> {
+        Ok(self
+            .read_pixels(meta, &[(x, y)], band)
+            .await?
+            .pop()
+            .flatten())
+    }
+
+    /// 여러 월드 좌표의 픽셀값을 위치 보존으로 읽는다 (RS_Values 재료).
+    ///
+    /// 같은 타일의 점들은 타일을 **한 번만** fetch+decode 한다 — 유일 타일 목록을
+    /// `fetch_tiles` 로 병합 요청 (pixel_value.rs 의 fetch-1회 계약이 회귀 감시).
+    /// 메모리 트레이드오프: 호출 하나가 건드린 유일 타일들의 디코드 결과를 동시에
+    /// 들고 있는다 — 비용은 리스트가 스치는 타일 수에 비례 (고정 상한 아님).
+    pub async fn read_pixels(
+        &self,
+        meta: &CogMeta,
+        points: &[(f64, f64)],
+        band: u32,
+    ) -> Result<Vec<Option<f64>>, MetaError> {
         let Some(g) = &meta.georef else {
             return Err(MetaError::NotGeoreferenced);
         };
         let (Some(l0), Some(ifd0)) = (meta.levels.first(), self.ifds.first()) else {
-            return Ok(None);
+            return Ok(vec![None; points.len()]);
         };
         if band == 0 || band > meta.num_bands {
-            return Ok(None);
+            return Ok(vec![None; points.len()]);
         }
-        // floor 격자 — 변환 준거는 Georef::world_to_raster (1-based) 하나뿐
-        let (col1, row1) = g.world_to_raster(x, y);
-        if col1 < 1
-            || row1 < 1
-            || col1 > i64::from(l0.image_width)
-            || row1 > i64::from(l0.image_height)
-        {
-            return Ok(None);
-        }
-        let (col, row) = ((col1 - 1) as u64, (row1 - 1) as u64);
-        let tile = ifd0
-            .fetch_tile(
-                (col / l0.tile_width as u64) as usize,
-                (row / l0.tile_height as u64) as usize,
-                &self.fetch,
-            )
+
+        // 1) 각 점 → 픽셀 (col,row); extent 밖은 None 으로 확정
+        let (tw, th) = (l0.tile_width as u64, l0.tile_height as u64);
+        let coords: Vec<Option<(u64, u64)>> = points
+            .iter()
+            .map(|(x, y)| {
+                let (col1, row1) = g.world_to_raster(*x, *y);
+                (col1 >= 1
+                    && row1 >= 1
+                    && col1 <= i64::from(l0.image_width)
+                    && row1 <= i64::from(l0.image_height))
+                .then(|| ((col1 - 1) as u64, (row1 - 1) as u64))
+            })
+            .collect();
+
+        // 2) 유일 타일만 병합 fetch → 각 1회 decode
+        let mut tiles: Vec<(usize, usize)> = coords
+            .iter()
+            .flatten()
+            .map(|(c, r)| ((c / tw) as usize, (r / th) as usize))
+            .collect();
+        tiles.sort_unstable();
+        tiles.dedup();
+        let fetched = ifd0
+            .fetch_tiles(&tiles, &self.fetch)
             .await
             .map_err(|e| MetaError::Tiff(e.to_string()))?;
         let planar = ifd0.planar_configuration();
-        let array = tile
-            .decode(&self.decoders)
-            .map_err(|e| MetaError::Tiff(e.to_string()))?;
-        let value = sample_array(
-            &array,
-            planar,
-            (row % l0.tile_height as u64) as usize,
-            (col % l0.tile_width as u64) as usize,
-            (band - 1) as usize,
-        )
-        .ok_or_else(|| {
-            MetaError::Tiff(format!(
-                "decoded tile shape {:?} does not contain pixel (row {}, col {}, band {})",
-                array.shape(),
-                row % l0.tile_height as u64,
-                col % l0.tile_width as u64,
-                band
-            ))
-        })?;
-        Ok(apply_nodata(value, meta.nodata))
+        let mut decoded = std::collections::HashMap::with_capacity(tiles.len());
+        for (key, tile) in tiles.iter().zip(fetched) {
+            let array = tile
+                .decode(&self.decoders)
+                .map_err(|e| MetaError::Tiff(e.to_string()))?;
+            decoded.insert(*key, array);
+        }
+
+        // 3) 샘플링 (위치 보존)
+        let mut out = Vec::with_capacity(points.len());
+        for coord in &coords {
+            let Some((col, row)) = coord else {
+                out.push(None);
+                continue;
+            };
+            let array = &decoded[&((col / tw) as usize, (row / th) as usize)];
+            let value = sample_array(
+                array,
+                planar,
+                (row % th) as usize,
+                (col % tw) as usize,
+                (band - 1) as usize,
+            )
+            .ok_or_else(|| {
+                MetaError::Tiff(format!(
+                    "decoded tile shape {:?} does not contain pixel (row {}, col {}, band {band})",
+                    array.shape(),
+                    row % th,
+                    col % tw,
+                ))
+            })?;
+            out.push(apply_nodata(value, meta.nodata));
+        }
+        Ok(out)
     }
 }
 
