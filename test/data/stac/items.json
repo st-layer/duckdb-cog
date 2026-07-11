@@ -1,0 +1,31 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "stac_version": "1.0.0",
+      "id": "scene-a",
+      "collection": "demo",
+      "bbox": [300000.0, 3994880.0, 305120.0, 4000000.0],
+      "geometry": null,
+      "properties": { "datetime": "2026-01-15T02:30:00Z" },
+      "assets": {
+        "data": {
+          "href": "basic_512x512_u16.tif",
+          "type": "image/tiff; application=geotiff; profile=cloud-optimized"
+        },
+        "thumbnail": { "href": "thumb.png", "type": "image/png" }
+      }
+    },
+    {
+      "type": "Feature",
+      "stac_version": "1.0.0",
+      "id": "scene-b",
+      "geometry": null,
+      "properties": {},
+      "assets": {
+        "data": { "href": "multiband_64x64_u8.tif" }
+      }
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+# name: test/sql/read_stac.test
+# description: read_stac(url) — STAC Item/ItemCollection 을 (item, asset) 행으로 (RFC §6.7)
+# group: [cog]
+
+statement error
+SELECT * FROM read_stac('x.json');
+----
+Catalog Error
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# 스키마: (item, asset) 행 — bbox 는 read_cog 와 동일 STRUCT 관례
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_stac('test/data/stac/items.json'));
+----
+item_id	VARCHAR
+collection	VARCHAR
+datetime	VARCHAR
+asset_key	VARCHAR
+href	VARCHAR
+media_type	VARCHAR
+bbox	STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE)
+
+# ItemCollection: 2 item × asset = 3행, graceful degradation (scene-b 결측 → NULL)
+query TTTTTT
+SELECT item_id, collection, datetime, asset_key, href, media_type FROM read_stac('test/data/stac/items.json') ORDER BY item_id, asset_key;
+----
+scene-a	demo	2026-01-15T02:30:00Z	data	basic_512x512_u16.tif	image/tiff; application=geotiff; profile=cloud-optimized
+scene-a	demo	2026-01-15T02:30:00Z	thumbnail	thumb.png	image/png
+scene-b	NULL	NULL	data	multiband_64x64_u8.tif	NULL
+
+# bbox: scene-a 값, scene-b NULL
+query IIT
+SELECT bbox.xmin::BIGINT, bbox.ymax::BIGINT, (bbox IS NULL)::VARCHAR FROM read_stac('test/data/stac/items.json') WHERE item_id = 'scene-a' AND asset_key = 'data';
+----
+300000	4000000	false
+
+query T
+SELECT bbox IS NULL FROM read_stac('test/data/stac/items.json') WHERE item_id = 'scene-b';
+----
+true
+
+# 단일 Item 문서도 허용
+query TT
+SELECT item_id, asset_key FROM read_stac('test/data/stac/single_item.json');
+----
+solo	cog
+
+# 실전 조인: STAC href → RS_Width (카탈로그에서 바로 메타 접근)
+query I
+SELECT RS_Width('${COG_TEST_FIXTURES}/' || href) FROM read_stac('test/data/stac/items.json') WHERE item_id = 'scene-b';
+----
+64
+
+# 잘못된 JSON → 경로 포함 에러
+statement error
+SELECT * FROM read_stac('test/data/stac/invalid.json');
+----
+invalid.json
+
+# 없는 파일 → 에러
+statement error
+SELECT * FROM read_stac('test/data/stac/no_such.json');
+----
+no_such.json

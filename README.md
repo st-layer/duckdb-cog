@@ -16,6 +16,11 @@ LOAD cog;
 SELECT level, tile_x, tile_y, bbox, crs
 FROM read_cog('https://example.com/sentinel2_B04.tif');
 
+-- Walk a STAC document and read COG metadata straight from its assets:
+SELECT s.item_id, RS_Width(s.href), RS_SRID(s.href)
+FROM read_stac('https://example.com/catalog/items.json') s
+WHERE s.media_type LIKE '%geotiff%';
+
 -- Sedona-style metadata accessors:
 SELECT RS_Width(f), RS_Height(f), RS_NumBands(f), RS_SRID(f), RS_MetaData(f)
 FROM (SELECT 's3://my-bucket/ortho.tif' AS f);
@@ -36,7 +41,7 @@ Early Phase 1 — the metadata surface is functional; pixel access is next.
 | `RS_NormalizedDifference` (point-form band math, NDVI-style) | ✅ |
 | `RS_ZonalStats` (bbox zones, count/sum/mean/min/max) | ✅ |
 | `RS_BandAsArray` (full band or bbox window, row-major) | ✅ |
-| `read_stac()` | Phase 2 |
+| `read_stac(url)` — STAC Item/ItemCollection to (item, asset) rows | ✅ |
 
 ## SQL surface
 

@@ -1,0 +1,12 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "solo",
+  "collection": "demo",
+  "bbox": [700000.0, 3949840.0, 700160.0, 3950000.0],
+  "geometry": null,
+  "properties": { "datetime": "2026-02-01T00:00:00Z" },
+  "assets": {
+    "cog": { "href": "tiny_16x16_u8.tif", "type": "image/tiff" }
+  }
+}
