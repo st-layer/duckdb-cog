@@ -37,9 +37,19 @@ RFC §6.8/R10: Apache Sedona `RS_*` 카탈로그는 **참조이지 계약이 아
 | `RS_MetaData(path)` | STRUCT | georef 파생 필드만 NULL, srid 0 | Sedona 1.5 는 DOUBLE 배열(10원소) — 우리는 DuckDB 관례의 named STRUCT: (upperleftx, upperlefty, width, height, scalex, scaley, skewx, skewy, srid, numbands) |
 | `RS_GeoReference(path)` | VARCHAR | NULL | GDAL 포맷만 지원 (`format` 파라미터·ESRI 포맷 없음). 6줄, `%.6f`: scaleX\nskewY\nskewX\nscaleY\nupperLeftX\nupperLeftY |
 
-## Phase 2 이후 (미구현)
+## Phase 2 — 픽셀 접근 (구현분)
 
-`RS_Value`/`RS_Values`, `RS_NormalizedDifference`, `RS_BandAsArray`, `RS_ZonalStats`,
+| 함수 (시그니처) | 반환 | NULL 규약 | Sedona 와의 차이 |
+| -- | -- | -- | -- |
+| `RS_Value(path, x DOUBLE, y DOUBLE[, band])` | DOUBLE | extent 밖·범위 밖 밴드·nodata·NULL 인자 → NULL | 인자형 외: level 0 고정 판독, 보간 없음(floor 격자 — 원점 코너는 픽셀 (0,0), 우/하단 경계 좌표는 밖). georef 없는 파일 → 에러 (좌표 해석 불가; bbox 필터와 동일 결정) |
+
+판정: T1 조밀 오라클 (`tests/oracle/test_rs_value_oracle.py`) — multiband 전 픽셀
+중심 ×3밴드 전수 + basic/edge 무작위 300점씩을 rasterio `ds.sample` 과 대조
+(ABI 일치 duckdb-python 으로 실제 익스텐션 로드, `just ext-test` 가 실행).
+
+## Phase 2 잔여 (미구현)
+
+`RS_Values`, `RS_NormalizedDifference`, `RS_BandAsArray`, `RS_ZonalStats`,
 `RS_WorldToRasterCoord`/`RS_RasterToWorldCoord` — RFC §6.8 표 참조. 래스터
 생성/변형 함수군(`RS_MakeRaster`, `RS_Resample` 등)은 명시적 범위 밖 (N3).
 

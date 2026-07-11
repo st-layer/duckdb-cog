@@ -31,7 +31,8 @@ Early Phase 1 — the metadata surface is functional; pixel access is next.
 | Local file, `http(s)://`, `s3://` sources (object_store; env credentials) | ✅ |
 | `RS_*` metadata accessors (Width/Height/NumBands/Scale/Skew/UpperLeft/SRID/BandNoDataValue/MetaData/GeoReference) | ✅ |
 | Lazy IO contract (metadata listing ≤ a few range GETs, pixels untouched) | ✅ tested |
-| Pixel access (`RS_Value`, `RS_Values`), band math, zonal stats | Phase 2 |
+| `RS_Value(path, x, y[, band])` pixel access (level 0, no interpolation, rasterio-verified) | ✅ |
+| `RS_Values`, band math (`RS_NormalizedDifference`), zonal stats | Phase 2 |
 | `read_stac()` | Phase 2 |
 
 ## SQL surface
