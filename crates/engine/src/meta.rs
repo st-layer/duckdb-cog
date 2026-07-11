@@ -109,8 +109,10 @@ impl Georef {
     /// 순수 변환: 경계 검사 없음 (extent 밖은 0 이하/초과 좌표로 환산).
     /// floor 격자 — 픽셀 좌상단 코너는 그 픽셀에 속한다.
     pub fn world_to_raster(&self, x: f64, y: f64) -> (i64, i64) {
-        let col = ((x - self.origin_x) / self.pixel_x).floor() as i64 + 1;
-        let row = ((self.origin_y - y) / self.pixel_y).floor() as i64 + 1;
+        // float→int `as` 는 포화 변환 — 극단 좌표에서 +1 이 debug 빌드 패닉을
+        // 내지 않도록 saturating_add (포화 결과는 어차피 범위 밖 판정으로 귀결).
+        let col = (((x - self.origin_x) / self.pixel_x).floor() as i64).saturating_add(1);
+        let row = (((self.origin_y - y) / self.pixel_y).floor() as i64).saturating_add(1);
         (col, row)
     }
 

@@ -421,15 +421,18 @@ impl VScalar for RsWorldToRasterCoord {
                 }
             }
         }
+        // i32 초과 좌표는 부분-NULL 대신 **struct 전체 NULL** (계약 단순화)
+        let rows: Vec<Option<(i32, i32)>> = rows
+            .iter()
+            .map(|r| {
+                r.and_then(|(c, w)| Some((i32::try_from(c).ok()?, i32::try_from(w).ok()?)))
+            })
+            .collect();
         let mut sv = output.struct_vector();
-        for (ci, pick) in [(0usize, 0usize), (1, 1)] {
+        for ci in 0..2usize {
             let vals: Vec<Option<i32>> = rows
                 .iter()
-                .map(|r| {
-                    r.and_then(|cr| {
-                        i32::try_from(if pick == 0 { cr.0 } else { cr.1 }).ok()
-                    })
-                })
+                .map(|r| r.map(|cr| if ci == 0 { cr.0 } else { cr.1 }))
                 .collect();
             write_values(&mut sv.child(ci, n), &vals);
         }

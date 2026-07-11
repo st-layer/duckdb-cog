@@ -49,3 +49,9 @@ query TT
 SELECT RS_WorldToRasterCoord(NULL::VARCHAR, 0.0, 0.0) IS NULL, RS_RasterToWorldCoord('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', NULL::INTEGER, 1) IS NULL;
 ----
 true	true
+
+# i32 초과 그리드 좌표(극단 월드 좌표) → struct 전체 NULL (부분-NULL 아님)
+query T
+SELECT RS_WorldToRasterCoord('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', 1.0e18, 3999995.0) IS NULL;
+----
+true
