@@ -142,6 +142,120 @@ impl<S: ByteSource> CogReader<S> {
         }
         Ok(out)
     }
+
+    /// bbox(닫힌 구간) 안에 **픽셀 중심**이 드는 level 0 픽셀들의 집계 (nodata 제외).
+    ///
+    /// zone 은 geometry 가 아니라 bbox — GEOS 비링크(N4) 하의 §6.8 적응.
+    /// 유효 픽셀 없음(교차 없음·범위 밖 밴드) → count 0 의 빈 집계.
+    /// 역전·비유한 bbox → 에러, georef 없음 → 에러 (bbox 필터와 동일 규칙).
+    pub async fn zonal_stats(
+        &self,
+        meta: &CogMeta,
+        bbox: [f64; 4],
+        band: u32,
+    ) -> Result<ZonalStats, MetaError> {
+        let empty = ZonalStats {
+            count: 0,
+            sum: 0.0,
+            min: None,
+            max: None,
+        };
+        if !bbox.iter().all(|v| v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
+            return Err(MetaError::InvalidFilter(format!(
+                "[{}, {}, {}, {}] must be finite with xmin<=xmax and ymin<=ymax",
+                bbox[0], bbox[1], bbox[2], bbox[3]
+            )));
+        }
+        let Some(g) = &meta.georef else {
+            return Err(MetaError::NotGeoreferenced);
+        };
+        let (Some(l0), Some(ifd0)) = (meta.levels.first(), self.ifds.first()) else {
+            return Ok(empty);
+        };
+        if band == 0 || band > meta.num_bands {
+            return Ok(empty);
+        }
+        // 중심 포함 규약: center(col) = ox + (col+0.5)px ∈ [xmin, xmax]
+        let col_min = ((bbox[0] - g.origin_x) / g.pixel_x - 0.5).ceil().max(0.0);
+        let col_max = ((bbox[2] - g.origin_x) / g.pixel_x - 0.5)
+            .floor()
+            .min(l0.image_width as f64 - 1.0);
+        let row_min = ((g.origin_y - bbox[3]) / g.pixel_y - 0.5).ceil().max(0.0);
+        let row_max = ((g.origin_y - bbox[1]) / g.pixel_y - 0.5)
+            .floor()
+            .min(l0.image_height as f64 - 1.0);
+        if col_min > col_max || row_min > row_max {
+            return Ok(empty);
+        }
+        let (col_min, col_max) = (col_min as u64, col_max as u64);
+        let (row_min, row_max) = (row_min as u64, row_max as u64);
+
+        // 영역이 걸치는 타일들 — 각 1회 fetch(병합)+decode 후 부분 순회
+        let (tw, th) = (l0.tile_width as u64, l0.tile_height as u64);
+        let mut tiles = Vec::new();
+        for ty in (row_min / th)..=(row_max / th) {
+            for tx in (col_min / tw)..=(col_max / tw) {
+                tiles.push((tx as usize, ty as usize));
+            }
+        }
+        let fetched = ifd0
+            .fetch_tiles(&tiles, &self.fetch)
+            .await
+            .map_err(|e| MetaError::Tiff(e.to_string()))?;
+        let planar = ifd0.planar_configuration();
+        let mut acc = empty;
+        for ((tx, ty), tile) in tiles.iter().zip(fetched) {
+            let array = tile
+                .decode(&self.decoders)
+                .map_err(|e| MetaError::Tiff(e.to_string()))?;
+            let (tx0, ty0) = (*tx as u64 * tw, *ty as u64 * th);
+            let r0 = row_min.max(ty0) - ty0;
+            let r1 = row_max.min(ty0 + th - 1) - ty0;
+            let c0 = col_min.max(tx0) - tx0;
+            let c1 = col_max.min(tx0 + tw - 1) - tx0;
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    let value = sample_array(
+                        &array,
+                        planar,
+                        r as usize,
+                        c as usize,
+                        (band - 1) as usize,
+                    )
+                    .ok_or_else(|| {
+                        MetaError::Tiff(format!(
+                            "decoded tile shape {:?} does not contain pixel (row {r}, col {c}, band {band})",
+                            array.shape(),
+                        ))
+                    })?;
+                    if let Some(v) = apply_nodata(value, meta.nodata) {
+                        acc.count += 1;
+                        acc.sum += v;
+                        acc.min = Some(acc.min.map_or(v, |m: f64| m.min(v)));
+                        acc.max = Some(acc.max.map_or(v, |m: f64| m.max(v)));
+                    }
+                }
+            }
+        }
+        Ok(acc)
+    }
+}
+
+/// bbox 영역 집계 결과 (RS_ZonalStats 재료). mean 은 sum/count 로 유도.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZonalStats {
+    /// 유효(비 nodata) 픽셀 수.
+    pub count: u64,
+    pub sum: f64,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+}
+
+impl ZonalStats {
+    /// 유효 픽셀 평균 — 빈 집계면 None.
+    pub fn mean(&self) -> Option<f64> {
+        (self.count > 0).then(|| self.sum / self.count as f64)
+    }
 }
 
 /// 디코드된 타일 배열에서 한 픽셀을 읽는다.

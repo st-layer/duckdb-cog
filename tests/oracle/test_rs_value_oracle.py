@@ -131,3 +131,35 @@ def test_normalized_difference_matches_rasterio(con):
         ).fetchall()
         actual = [r[0] for r in rows]
         assert actual == pytest.approx(expected)
+
+
+def test_zonal_stats_matches_numpy_windows(con):
+    """무작위 윈도 10개 × basic/edge — count/sum/mean/min/max == numpy."""
+    import numpy as np
+
+    rng = random.Random(20260712)
+    for name in ("basic_512x512_u16.tif", "edge_400x300_u16.tif"):
+        path = GEN / name
+        with rasterio.open(path) as ds:
+            t = ds.transform
+            for _ in range(10):
+                c0 = rng.randrange(0, ds.width - 1)
+                c1 = rng.randrange(c0, ds.width)
+                r0 = rng.randrange(0, ds.height - 1)
+                r1 = rng.randrange(r0, ds.height)
+                a = ds.read(1, window=((r0, r1 + 1), (c0, c1 + 1))).astype(np.float64)
+                # 픽셀 중심 포함 bbox (중심 좌표 그대로 경계로)
+                bbox = [
+                    t.c + (c0 + 0.5) * t.a,
+                    t.f + (r1 + 0.5) * t.e,
+                    t.c + (c1 + 0.5) * t.a,
+                    t.f + (r0 + 0.5) * t.e,
+                ]
+                q = lambda stat: con.execute(
+                    f"SELECT RS_ZonalStats('{path}', {bbox}, 1, '{stat}')"
+                ).fetchone()[0]
+                assert q("count") == a.size
+                assert q("sum") == pytest.approx(a.sum())
+                assert q("mean") == pytest.approx(a.mean())
+                assert q("min") == a.min()
+                assert q("max") == a.max()

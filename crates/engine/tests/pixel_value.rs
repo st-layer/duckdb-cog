@@ -161,3 +161,43 @@ fn normalized_difference_contract() {
     assert_eq!(nd(None, Some(1.0)), None);
     assert_eq!(nd(Some(1.0), None), None);
 }
+
+/// bbox 영역 집계: rasterio+numpy 오라클 수치와 일치 (픽셀 중심 포함, nodata 제외).
+#[test]
+fn zonal_stats_matches_oracle_numbers() {
+    let (meta, reader) = block_on(open_cog(fixture("basic_512x512_u16.tif"))).expect("valid COG");
+    let z = block_on(reader.zonal_stats(&meta, [300000.0, 3999000.0, 301000.0, 4000000.0], 1))
+        .expect("io ok");
+    assert_eq!(z.count, 10_000);
+    assert_eq!(z.sum, 326_869_359.0);
+    assert_eq!(z.min, Some(17.0));
+    assert_eq!(z.max, Some(65_532.0));
+    // 타일 경계를 걸치는 영역 (4타일)
+    let z2 = block_on(reader.zonal_stats(&meta, [302000.0, 3997000.0, 303000.0, 3998000.0], 1))
+        .expect("io ok");
+    assert_eq!((z2.count, z2.sum), (10_000, 329_035_529.0));
+}
+
+#[test]
+fn zonal_stats_excludes_nodata_and_handles_empty() {
+    let (meta, reader) =
+        block_on(open_cog(fixture("nodatahole_64x64_u16.tif"))).expect("valid COG");
+    let z = block_on(reader.zonal_stats(&meta, [900000.0, 3999980.0, 900020.0, 4000000.0], 1))
+        .expect("io ok");
+    assert_eq!(
+        (z.count, z.sum, z.min, z.max),
+        (3, 26_257.0, Some(5849.0), Some(14_370.0))
+    );
+    // extent 와 교차하지 않는 영역 → 빈 집계
+    let empty = block_on(reader.zonal_stats(&meta, [0.0, 0.0, 1.0, 1.0], 1)).expect("io ok");
+    assert_eq!((empty.count, empty.min), (0, None));
+    // 범위 밖 밴드 → 빈 집계
+    let nb = block_on(reader.zonal_stats(&meta, [900000.0, 3999980.0, 900020.0, 4000000.0], 9))
+        .expect("io ok");
+    assert_eq!(nb.count, 0);
+    // 역전 bbox → 에러
+    assert!(
+        block_on(reader.zonal_stats(&meta, [1.0, 0.0, 0.0, 1.0], 1)).is_err(),
+        "역전 bbox 는 에러"
+    );
+}
