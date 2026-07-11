@@ -10,7 +10,7 @@ require-env COG_TEST_FIXTURES
 query TT
 SELECT typeof(RS_WorldToRasterCoord(f, 300005.0, 3999995.0)), typeof(RS_RasterToWorldCoord(f, 1, 1)) FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
 ----
-STRUCT("col" INTEGER, "row" INTEGER)	STRUCT(x DOUBLE, y DOUBLE)
+STRUCT(col INTEGER, "row" INTEGER)	STRUCT(x DOUBLE, y DOUBLE)
 
 # world → raster (1-based): 원점 코너 = (1,1), 픽셀 중심도 동일, 257번째 픽셀
 query IIII
