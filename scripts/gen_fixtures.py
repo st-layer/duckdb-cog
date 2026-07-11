@@ -38,8 +38,12 @@ def gen_cog(
 
     nodata 가 있으면 그 값(관례상 0)은 데이터에서 제외 — 최솟값은 1.
     plant_nodata_at=(row, col) 은 그 픽셀에 nodata 를 실제로 심는다
-    (RS_Value nodata→NULL E2E 재료). 압축 출력은 rasterio 휠 고정(uv.lock)이
-    라이브러리 버전을 못박아 결정적 — lock 해시가 계속 감시한다.
+    (RS_Value nodata→NULL E2E 재료).
+
+    압축 출력의 결정성 주의: rasterio 휠은 플랫폼별로 각자 빌드된 libdeflate/
+    libzstd 를 번들한다 — 같은 버전 핀이라도 mac↔linux 바이트 동일성은 보장이
+    아니라 **CI(ubuntu)가 실측 판정**하는 가정이다. 해시 불일치가 나면 압축
+    픽스처는 lock 해시 대신 decoded-픽셀 값 검증으로 전환한다 (리뷰 기록 참조).
     """
     rng = np.random.default_rng(42)
     dt = np.dtype(dtype)
