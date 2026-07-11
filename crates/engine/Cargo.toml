@@ -19,3 +19,7 @@ async-tiff = { version = "0.3", default-features = false, optional = true }
 async-trait = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 futures = { version = "0.3", features = ["executor"], optional = true }
+
+[dev-dependencies]
+# T4 property-based 불변식 (RFC §6.9) — dev 전용, wasm 판정(cargo check)과 무관
+proptest = "1"
