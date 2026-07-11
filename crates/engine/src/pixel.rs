@@ -236,6 +236,7 @@ impl<S: ByteSource> CogReader<S> {
     /// `bbox: None` = 전체 level 0 밴드 (georef 불요 — 좌표 해석이 없다).
     /// `bbox: Some` = 픽셀 중심 포함 윈도 (zonal 과 동일 규약; georef 필요).
     /// 범위 밖 밴드 → `Ok(None)` (SQL NULL — 빈 배열과 구분). nodata → None 원소.
+    /// **메모리 주의**: 전체 밴드는 통째로 실체화된다 (대형 COG 는 bbox 윈도 권장).
     pub async fn band_window(
         &self,
         meta: &CogMeta,
@@ -247,6 +248,9 @@ impl<S: ByteSource> CogReader<S> {
         };
         if band == 0 || band > meta.num_bands {
             return Ok(None);
+        }
+        if l0.image_width == 0 || l0.image_height == 0 {
+            return Ok(Some(Vec::new()));
         }
         let (col_min, col_max, row_min, row_max) = match bbox {
             None => (0, l0.image_width as u64 - 1, 0, l0.image_height as u64 - 1),

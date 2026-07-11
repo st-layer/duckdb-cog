@@ -654,7 +654,27 @@ impl VScalar for RsBandAsArray {
         let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
         let bandv = input.flat_vector(1);
         let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
+        // bbox 자식은 루프 밖에서 한 번만 차용 (RS_ZonalStats 패턴 — 행당 FFI 방지)
         let has_bbox = input.num_columns() > 2;
+        let bnull = has_bbox.then(|| input.flat_vector(2));
+        let blist = has_bbox.then(|| input.list_vector(2));
+        let bmax = match (&bnull, &blist) {
+            (Some(bn_v), Some(bl_v)) => (0..n)
+                .filter(|i| !bn_v.row_is_null(*i as u64))
+                .map(|i| {
+                    let (o, l) = bl_v.get_entry(i);
+                    o + l
+                })
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        };
+        let bchild = blist.as_ref().map(|bl| bl.child(bmax));
+        // SAFETY: 자식은 DOUBLE — f64 표현. bmax 는 비 NULL 행들의 최대 (offset+len).
+        let bvals: &[f64] = match &bchild {
+            Some(c) => unsafe { c.as_slice_with_len::<f64>(bmax) },
+            None => &[],
+        };
 
         type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
         let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
@@ -664,29 +684,26 @@ impl VScalar for RsBandAsArray {
                 rows.push(None);
                 continue;
             }
-            let bbox = if has_bbox {
-                let bnull = input.flat_vector(2);
-                if bnull.row_is_null(i as u64) {
-                    rows.push(None);
-                    continue;
+            let bbox = match (&bnull, &blist, &bchild) {
+                (Some(bn_v), Some(bl_v), Some(bc)) => {
+                    if bn_v.row_is_null(i as u64) {
+                        rows.push(None);
+                        continue;
+                    }
+                    let (bo, bn) = bl_v.get_entry(i);
+                    if bn != 4 {
+                        return Err(format!(
+                            "RS_BandAsArray: bbox must have exactly 4 elements, got {bn}"
+                        )
+                        .into());
+                    }
+                    if (0..4).any(|k| bc.row_is_null((bo + k) as u64)) {
+                        rows.push(None);
+                        continue;
+                    }
+                    Some([bvals[bo], bvals[bo + 1], bvals[bo + 2], bvals[bo + 3]])
                 }
-                let bl = input.list_vector(2);
-                let (bo, bn) = bl.get_entry(i);
-                if bn != 4 {
-                    return Err(format!(
-                        "RS_BandAsArray: bbox must have exactly 4 elements, got {bn}"
-                    )
-                    .into());
-                }
-                let bchild = bl.child(bo + bn);
-                if (0..4).any(|k| bchild.row_is_null((bo + k) as u64)) {
-                    rows.push(None);
-                    continue;
-                }
-                let bv = unsafe { bchild.as_slice_with_len::<f64>(bo + bn) };
-                Some([bv[bo], bv[bo + 1], bv[bo + 2], bv[bo + 3]])
-            } else {
-                None
+                _ => None,
             };
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
             let opened = match cache.get(&path) {
