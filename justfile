@@ -58,6 +58,9 @@ ext-test: ext fixtures
         exit 1
     fi
     COG_TEST_FIXTURES=test/data/generated COG_TEST_HTTP="http://127.0.0.1:$port" make test_debug
+    # T1 조밀 오라클 (RS_Value ↔ rasterio, ABI 일치 duckdb-python) —
+    # 빌드 산출물이 필요해 check 의 oracle 과 분리 (COG_EXT_BINARY 로 활성화)
+    COG_EXT_BINARY=build/debug/cog.duckdb_extension uv run pytest tests/oracle/test_rs_value_oracle.py -x -q
 
 # 엔진 wasm32-unknown-unknown 컴파일 판정 (RFC G8) — rustup 환경 필요, CI 상시 실행.
 # macOS: Apple clang 은 wasm 타깃 미지원(zstd-sys C 빌드) — homebrew llvm 이 있으면 사용.
