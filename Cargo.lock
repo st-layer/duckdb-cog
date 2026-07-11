@@ -680,6 +680,7 @@ dependencies = [
  "bytes",
  "futures",
  "proptest",
+ "serde_json",
 ]
 
 [[package]]

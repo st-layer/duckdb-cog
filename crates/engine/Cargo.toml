@@ -9,7 +9,7 @@ default = ["reader"]
 # reader = async-tiff 기반 COG 메타데이터 읽기 (source.rs / meta.rs).
 # 배포 CI의 emscripten 잡은 Rust 1.86 고정(emsdk 3.1.71 궁합)인데 async-tiff 0.3 은
 # MSRV ≥1.87 — 그래서 emscripten 타깃에서만 이 feature 를 끈다 (루트 Cargo.toml 참조).
-reader = ["dep:async-tiff", "dep:async-trait", "dep:bytes", "dep:futures"]
+reader = ["dep:async-tiff", "dep:async-trait", "dep:bytes", "dep:futures", "dep:serde_json"]
 
 [dependencies]
 # async-tiff: decode/fetch 위임 대상 (RFC N7). 직접 호출은 source.rs 경계 뒤에서만 (R8).
@@ -19,6 +19,8 @@ async-tiff = { version = "0.3", default-features = false, optional = true }
 async-trait = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 futures = { version = "0.3", features = ["executor"], optional = true }
+# STAC 문서 파싱 (RFC §6.7) — wasm 무해
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 # T4 property-based 불변식 (RFC §6.9) — dev 전용, wasm 판정(cargo check)과 무관

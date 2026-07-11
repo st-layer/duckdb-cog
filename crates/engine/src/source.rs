@@ -66,6 +66,23 @@ impl ByteSource for MemorySource {
     }
 }
 
+/// 문서 전체를 읽는다 — 길이를 모르는 [`ByteSource`] 에서 점진 배증으로
+/// (EOF 클램프 계약 활용: 반환이 요청보다 짧으면 끝에 닿은 것).
+/// STAC 등 통짜 JSON 문서용. 64MiB 초과는 에러 (COG 메타가 아닌 오용 방지).
+pub async fn fetch_all<S: ByteSource>(source: &S) -> Result<Bytes, SourceError> {
+    let mut cap: u64 = 64 * 1024;
+    loop {
+        let bytes = source.fetch(0..cap).await?;
+        if (bytes.len() as u64) < cap {
+            return Ok(bytes);
+        }
+        if cap >= 64 * 1024 * 1024 {
+            return Err(SourceError("document exceeds 64MiB".into()));
+        }
+        cap *= 4;
+    }
+}
+
 /// [`ByteSource`] → async-tiff 어댑터 (engine 내부 전용).
 ///
 /// 메타데이터 경로(`MetadataFetch`, readahead 캐시에 소유됨)와 픽셀 경로

@@ -12,6 +12,8 @@ mod meta;
 mod pixel;
 #[cfg(feature = "reader")]
 mod source;
+#[cfg(feature = "reader")]
+mod stac;
 
 #[cfg(feature = "reader")]
 pub use meta::{
@@ -21,7 +23,9 @@ pub use meta::{
 #[cfg(feature = "reader")]
 pub use pixel::{apply_nodata, normalized_difference, open_cog, CogReader, ZonalStats};
 #[cfg(feature = "reader")]
-pub use source::{ByteSource, MemorySource, SourceError};
+pub use source::{fetch_all, ByteSource, MemorySource, SourceError};
+#[cfg(feature = "reader")]
+pub use stac::{parse_stac, StacAssetRow, StacError};
 // ByteSource 구현자가 시그니처 타입(Bytes, BoxFuture)과 block_on 을 별도 의존성
 // 없이 쓰도록 재수출.
 #[cfg(feature = "reader")]

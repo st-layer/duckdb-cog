@@ -392,12 +392,135 @@ impl VTab for ReadCogVTab {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
+#[repr(C)]
+struct ReadStacBindData {
+    /// bind 시점에 문서 전체를 읽어 확정된 (item, asset) 행들.
+    rows: Vec<engine::StacAssetRow>,
+}
+
+#[cfg(not(target_os = "emscripten"))]
+#[repr(C)]
+struct ReadStacInitData {
+    cursor: std::sync::atomic::AtomicUsize,
+}
+
+/// `SELECT * FROM read_stac(url);` — STAC Item/ItemCollection 을 (item, asset)
+/// 행으로 (RFC §6.7). 파싱·행 모델은 engine (graceful degradation 포함).
+#[cfg(not(target_os = "emscripten"))]
+struct ReadStacVTab;
+
+#[cfg(not(target_os = "emscripten"))]
+impl VTab for ReadStacVTab {
+    type InitData = ReadStacInitData;
+    type BindData = ReadStacBindData;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        for col in [
+            "item_id",
+            "collection",
+            "datetime",
+            "asset_key",
+            "href",
+            "media_type",
+        ] {
+            bind.add_result_column(col, LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        }
+        let double = || LogicalTypeHandle::from(LogicalTypeId::Double);
+        bind.add_result_column(
+            "bbox",
+            LogicalTypeHandle::struct_type(&[
+                ("xmin", double()),
+                ("ymin", double()),
+                ("xmax", double()),
+                ("ymax", double()),
+            ]),
+        );
+        let url = bind.get_parameter(0).to_string();
+        let source = open_source(&url).map_err(|e| format!("read_stac: {e}"))?;
+        let bytes = engine::futures::executor::block_on(engine::fetch_all(&source))
+            .map_err(|e| format!("read_stac: '{url}': {e}"))?;
+        let rows = engine::parse_stac(&bytes).map_err(|e| format!("read_stac: '{url}': {e}"))?;
+        Ok(ReadStacBindData { rows })
+    }
+
+    fn init(_: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        Ok(ReadStacInitData {
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        const CHUNK: usize = 2048;
+        let rows = &func.get_bind_data().rows;
+        let start = func
+            .get_init_data()
+            .cursor
+            .fetch_add(CHUNK, Ordering::Relaxed);
+        if start >= rows.len() {
+            output.set_len(0);
+            return Ok(());
+        }
+        let batch = &rows[start..(start + CHUNK).min(rows.len())];
+        // VARCHAR 6컬럼: 값 insert / 결측 set_null
+        for (col, get) in [
+            (
+                0usize,
+                (|r: &engine::StacAssetRow| Some(r.item_id.as_str()))
+                    as fn(&engine::StacAssetRow) -> Option<&str>,
+            ),
+            (1, |r| r.collection.as_deref()),
+            (2, |r| r.datetime.as_deref()),
+            (3, |r| Some(r.asset_key.as_str())),
+            (4, |r| Some(r.href.as_str())),
+            (5, |r| r.media_type.as_deref()),
+        ] {
+            let mut v = output.flat_vector(col);
+            for (i, row) in batch.iter().enumerate() {
+                match get(row) {
+                    Some(s) => v.insert(i, s),
+                    None => v.set_null(i),
+                }
+            }
+        }
+        // bbox STRUCT — read_cog 와 동일 패턴
+        // SAFETY: 자식 4개는 DOUBLE 로 선언 — f64 표현, batch 길이는 CHUNK 이하.
+        unsafe {
+            let mut bbox = output.struct_vector(6);
+            for ci in 0..4 {
+                let mut child = bbox.child(ci, batch.len());
+                let child = child.as_mut_slice::<f64>();
+                for (i, row) in batch.iter().enumerate() {
+                    if let Some(b) = row.bbox {
+                        child[i] = b[ci];
+                    }
+                }
+            }
+            for (i, row) in batch.iter().enumerate() {
+                if row.bbox.is_none() {
+                    bbox.set_null(i);
+                }
+            }
+        }
+        output.set_len(batch.len());
+        Ok(())
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        Some(vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)])
+    }
+}
+
 #[duckdb_entrypoint_c_api]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<VersionVTab>("cog_version")?;
     #[cfg(not(target_os = "emscripten"))]
     {
         con.register_table_function::<ReadCogVTab>("read_cog")?;
+        con.register_table_function::<ReadStacVTab>("read_stac")?;
         rs_meta::register(&con)?;
     }
     Ok(())
