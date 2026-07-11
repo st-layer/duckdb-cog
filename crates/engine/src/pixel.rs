@@ -194,3 +194,16 @@ pub fn apply_nodata(value: f64, nodata: Option<f64>) -> Option<f64> {
         _ => Some(value),
     }
 }
+
+/// 정규화 차분 (v2 - v1) / (v2 + v1) — NDVI 등 (RFC §6.8).
+///
+/// Sedona 의 raster-out RS_NormalizedDifference 와 달리 포인트 값 연산이다
+/// (N3: 우리는 reader — 래스터 생성 없음). 결측·합 0 → None.
+pub fn normalized_difference(v1: Option<f64>, v2: Option<f64>) -> Option<f64> {
+    let (v1, v2) = (v1?, v2?);
+    let sum = v1 + v2;
+    if sum == 0.0 {
+        return None;
+    }
+    Some((v2 - v1) / sum)
+}

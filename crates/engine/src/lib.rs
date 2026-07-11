@@ -19,7 +19,7 @@ pub use meta::{
     MetaError, TileRow,
 };
 #[cfg(feature = "reader")]
-pub use pixel::{apply_nodata, open_cog, CogReader};
+pub use pixel::{apply_nodata, normalized_difference, open_cog, CogReader};
 #[cfg(feature = "reader")]
 pub use source::{ByteSource, MemorySource, SourceError};
 // ByteSource 구현자가 시그니처 타입(Bytes, BoxFuture)과 block_on 을 별도 의존성

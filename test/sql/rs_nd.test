@@ -1,0 +1,44 @@
+# name: test/sql/rs_nd.test
+# description: RS_NormalizedDifference(path, x, y, b1, b2) — 포인트형 (RFC §6.8, N3 정합 이탈)
+# group: [cog]
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# (v2-v1)/(v2+v1) — multiband (191,110,51) / (136,32,155) 지점, rasterio 오라클 수치
+query RR
+SELECT round(RS_NormalizedDifference(f, 600325.0, 3899675.0, 1, 2), 6), round(RS_NormalizedDifference(f, 600005.0, 3899995.0, 1, 2), 6) FROM (SELECT '${COG_TEST_FIXTURES}/multiband_64x64_u8.tif' AS f);
+----
+-0.269103
+-0.619048
+
+# 같은 밴드끼리는 0
+query R
+SELECT RS_NormalizedDifference('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', 600325.0, 3899675.0, 2, 2);
+----
+0.0
+
+# 밴드 순서 뒤집으면 부호 반전
+query R
+SELECT round(RS_NormalizedDifference('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', 600325.0, 3899675.0, 2, 1), 6);
+----
+0.269103
+
+# extent 밖 / 범위 밖 밴드 / nodata 픽셀 → NULL
+query RRR
+SELECT RS_NormalizedDifference('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', 0.0, 0.0, 1, 2), RS_NormalizedDifference('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', 600325.0, 3899675.0, 1, 4), RS_NormalizedDifference('${COG_TEST_FIXTURES}/nodatahole_64x64_u16.tif', 900005.0, 3999995.0, 1, 1);
+----
+NULL	NULL	NULL
+
+# NULL 인자 → NULL
+query R
+SELECT RS_NormalizedDifference('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', 600325.0, NULL::DOUBLE, 1, 2);
+----
+NULL
+
+# 없는 파일 → 에러
+statement error
+SELECT RS_NormalizedDifference('${COG_TEST_FIXTURES}/no_such.tif', 0.0, 0.0, 1, 2);
+----
+no_such.tif

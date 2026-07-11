@@ -385,6 +385,86 @@ impl VScalar for RsValue {
     }
 }
 
+/// `RS_NormalizedDifference(path, x, y, band1, band2)` — (v2-v1)/(v2+v1) 포인트 값.
+/// Sedona 는 raster 를 반환하지만 우리는 reader (N3) — 포인트형 이탈 (문서화).
+/// 결측(extent 밖·nodata·범위 밖 밴드)·합 0·NULL 인자 → NULL.
+struct RsNormalizedDifference;
+
+impl VScalar for RsNormalizedDifference {
+    type State = ();
+
+    fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let paths = input.flat_vector(0);
+        // SAFETY: 컬럼 타입은 signatures() 선언(V,D,D,I,I)과 일치.
+        let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
+        let xv = input.flat_vector(1);
+        let xs = unsafe { xv.as_slice_with_len::<f64>(n) };
+        let yv = input.flat_vector(2);
+        let ys = unsafe { yv.as_slice_with_len::<f64>(n) };
+        let b1v = input.flat_vector(3);
+        let b1s = unsafe { b1v.as_slice_with_len::<i32>(n) };
+        let b2v = input.flat_vector(4);
+        let b2s = unsafe { b2v.as_slice_with_len::<i32>(n) };
+
+        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
+        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if paths.row_is_null(i as u64)
+                || xv.row_is_null(i as u64)
+                || yv.row_is_null(i as u64)
+                || b1v.row_is_null(i as u64)
+                || b2v.row_is_null(i as u64)
+            {
+                rows.push(None);
+                continue;
+            }
+            let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
+            let opened = match cache.get(&path) {
+                Some(o) => Rc::clone(o),
+                None => {
+                    let source =
+                        open_source(&path).map_err(|e| format!("RS_NormalizedDifference: {e}"))?;
+                    let o = engine::futures::executor::block_on(engine::open_cog(source))
+                        .map_err(|e| format!("RS_NormalizedDifference: '{path}': {e}"))?;
+                    let o = Rc::new(o);
+                    cache.insert(path.clone(), Rc::clone(&o));
+                    o
+                }
+            };
+            let (meta, reader) = (&opened.0, &opened.1);
+            // 음수/0 밴드는 u32 변환 실패 → 범위 밖과 동일하게 NULL
+            let read = |b: i32| -> Result<Option<f64>, String> {
+                match u32::try_from(b).ok() {
+                    None => Ok(None),
+                    Some(b) => {
+                        engine::futures::executor::block_on(reader.read_pixel(meta, xs[i], ys[i], b))
+                            .map_err(|e| format!("RS_NormalizedDifference: '{path}': {e}"))
+                    }
+                }
+            };
+            let (v1, v2) = (read(b1s[i])?, read(b2s[i])?);
+            rows.push(engine::normalized_difference(v1, v2));
+        }
+        write_values(&mut output.flat_vector(), &rows);
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        let d = || LogicalTypeHandle::from(LogicalTypeId::Double);
+        let i = || LogicalTypeHandle::from(LogicalTypeId::Integer);
+        vec![ScalarFunctionSignature::exact(
+            vec![LogicalTypeId::Varchar.into(), d(), d(), i(), i()],
+            d(),
+        )]
+    }
+}
+
 /// `RS_Values(path, xs DOUBLE[], ys DOUBLE[][, band])` — 배치 픽셀 (위치 보존).
 /// Sedona 는 Point geometry 배열 인자 — 우리는 좌표 배열 쌍 (geometry 타입 부재,
 /// 문서화된 이탈). 리스트 인자 NULL → 결과 NULL, 원소 NULL/extent 밖/nodata →
@@ -755,6 +835,7 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     con.register_scalar_function::<RsMetaData>("RS_MetaData")?;
     con.register_scalar_function::<RsValue>("RS_Value")?;
     con.register_scalar_function::<RsValues>("RS_Values")?;
+    con.register_scalar_function::<RsNormalizedDifference>("RS_NormalizedDifference")?;
     con.register_scalar_function::<RsWorldToRasterCoord>("RS_WorldToRasterCoord")?;
     con.register_scalar_function::<RsRasterToWorldCoord>("RS_RasterToWorldCoord")?;
     Ok(())

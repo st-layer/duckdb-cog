@@ -146,3 +146,18 @@ fn batch_fetches_each_tile_once() {
         "타일 fetch {tile_fetches}회 — 4096점 배치가 타일을 반복 fetch (캐시 회귀)"
     );
 }
+
+/// normalized difference 순수 함수 계약: (v2-v1)/(v2+v1), 합 0·결측 → None.
+#[test]
+fn normalized_difference_contract() {
+    use engine::normalized_difference as nd;
+    assert_eq!(
+        nd(Some(191.0), Some(110.0)),
+        Some((110.0 - 191.0) / (110.0 + 191.0))
+    );
+    assert_eq!(nd(Some(5.0), Some(5.0)), Some(0.0));
+    assert_eq!(nd(Some(0.0), Some(0.0)), None, "합 0 → 정의 불가");
+    assert_eq!(nd(Some(-3.0), Some(3.0)), None, "합 0 (부호 상쇄)");
+    assert_eq!(nd(None, Some(1.0)), None);
+    assert_eq!(nd(Some(1.0), None), None);
+}

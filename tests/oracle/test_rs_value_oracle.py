@@ -107,3 +107,27 @@ def test_rs_values_batch_matches_rasterio(con):
                 f"SELECT RS_Values('{path}', ?, ?, {band})", [xs, ys]
             ).fetchone()
             assert actual == pytest.approx(expected), f"band {band} 배치 불일치"
+
+
+def test_normalized_difference_matches_rasterio(con):
+    """전 픽셀 중심에서 ND(1,2) == rasterio 로 계산한 (b2-b1)/(b2+b1)."""
+    path = GEN / "multiband_64x64_u8.tif"
+    with rasterio.open(path) as ds:
+        t = ds.transform
+        pts = [
+            (t.c + (c + 0.5) * t.a, t.f + (r + 0.5) * t.e)
+            for r in range(ds.height)
+            for c in range(ds.width)
+        ]
+        b1 = [float(v[0]) for v in ds.sample(pts)]
+        b2 = [float(v[1]) for v in ds.sample(pts)]
+        expected = [
+            None if (x + y) == 0 else (y - x) / (y + x) for x, y in zip(b1, b2)
+        ]
+        con.execute("CREATE OR REPLACE TABLE ndpts(x DOUBLE, y DOUBLE)")
+        con.executemany("INSERT INTO ndpts VALUES (?, ?)", pts)
+        rows = con.execute(
+            f"SELECT RS_NormalizedDifference('{path}', x, y, 1, 2) FROM ndpts ORDER BY rowid"
+        ).fetchall()
+        actual = [r[0] for r in rows]
+        assert actual == pytest.approx(expected)
