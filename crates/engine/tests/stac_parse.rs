@@ -45,7 +45,10 @@ fn parses_item_collection_with_graceful_degradation() {
 #[test]
 fn rejects_invalid_documents() {
     assert!(parse_stac(b"{ not json").is_err());
-    assert!(parse_stac(br#"{"type": "Unknown"}"#).is_err(), "모르는 type");
+    assert!(
+        parse_stac(br#"{"type": "Unknown"}"#).is_err(),
+        "모르는 type"
+    );
     // asset 에 href 가 없으면 그 asset 은 건너뛴다 (graceful) — item 자체는 유효
     let rows = parse_stac(
         br#"{"type": "Feature", "id": "x", "properties": {},
@@ -65,4 +68,22 @@ fn fetch_all_reads_whole_document_progressively() {
     let small = vec![b'y'; 10];
     let got = block_on(fetch_all(&MemorySource::new(small.clone()))).expect("io ok");
     assert_eq!(got.as_ref(), small.as_slice());
+}
+
+#[test]
+fn three_dimensional_bbox_drops_z() {
+    // 6원소 bbox = [xmin, ymin, zmin, xmax, ymax, zmax] → z 제외 인덱스 (0,1,3,4)
+    let rows = parse_stac(
+        br#"{"type": "Feature", "id": "z", "bbox": [10.0, 20.0, -5.0, 30.0, 40.0, 99.0],
+             "properties": {}, "assets": {"a": {"href": "h.tif"}}}"#,
+    )
+    .expect("valid");
+    assert_eq!(rows[0].bbox, Some([10.0, 20.0, 30.0, 40.0]));
+    // 그 외 길이(5 등)는 graceful None
+    let rows = parse_stac(
+        br#"{"type": "Feature", "id": "w", "bbox": [1.0, 2.0, 3.0, 4.0, 5.0],
+             "properties": {}, "assets": {"a": {"href": "h.tif"}}}"#,
+    )
+    .expect("valid");
+    assert_eq!(rows[0].bbox, None);
 }

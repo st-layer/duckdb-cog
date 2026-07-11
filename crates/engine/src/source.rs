@@ -76,7 +76,8 @@ pub async fn fetch_all<S: ByteSource>(source: &S) -> Result<Bytes, SourceError> 
         if (bytes.len() as u64) < cap {
             return Ok(bytes);
         }
-        if cap >= 64 * 1024 * 1024 {
+        // 정확히 cap 크기일 수 있으므로 한도 초과 판정은 다음 배증이 한도를 넘을 때
+        if cap > 64 * 1024 * 1024 {
             return Err(SourceError("document exceeds 64MiB".into()));
         }
         cap *= 4;
