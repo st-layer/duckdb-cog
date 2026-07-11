@@ -41,3 +41,9 @@ statement error
 SELECT * FROM read_cog('${COG_TEST_HTTP}/no_such.tif');
 ----
 no_such.tif
+
+# ---- tiny (<32KiB): 원격 EOF 클램프 (object_store 는 가용 분만 반환) ----
+query II
+SELECT RS_Width(f), RS_UpperLeftX(f)::BIGINT FROM (SELECT '${COG_TEST_HTTP}/tiny_16x16_u8.tif' AS f);
+----
+16	700000

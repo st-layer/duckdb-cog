@@ -23,7 +23,8 @@ impl ByteSource for CountingSource {
         range: std::ops::Range<u64>,
     ) -> engine::futures::future::BoxFuture<'_, Result<engine::bytes::Bytes, SourceError>> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
-        self.bytes.fetch_add(range.end - range.start, Ordering::Relaxed);
+        self.bytes
+            .fetch_add(range.end - range.start, Ordering::Relaxed);
         self.inner.fetch(range)
     }
 }
@@ -54,12 +55,30 @@ fn metadata_listing_never_touches_pixel_data() {
     let fetches = fetches.load(Ordering::Relaxed);
     let bytes = bytes.load(Ordering::Relaxed);
     // 계약 1: 요청 횟수는 상수 규모 (IFD 체인 순회) — 타일 수에 비례하면 회귀.
-    assert!(fetches <= 8, "fetch {fetches}회 — 메타데이터 나열이 과도한 왕복 유발");
+    assert!(
+        fetches <= 8,
+        "fetch {fetches}회 — 메타데이터 나열이 과도한 왕복 유발"
+    );
     // 계약 2: 읽은 바이트 ≪ 파일 크기 — 픽셀 데이터(파일의 대부분)를 안 끌어온다.
     assert!(
         bytes * 4 < total,
         "{bytes}B / 전체 {total}B — 메타데이터 읽기가 픽셀 영역을 침범"
     );
+}
+
+/// EOF 클램프 계약: readahead 는 파일 길이를 모른 채 32KiB 를 선요청한다 —
+/// 32KiB 미만 COG 도 읽혀야 한다 (소스가 가용 분까지 클램프).
+#[test]
+fn cog_smaller_than_readahead_is_readable() {
+    let raw = fixture_bytes("tiny_16x16_u8.tif");
+    assert!(
+        (raw.len() as u64) < 32 * 1024,
+        "픽스처가 32KiB 이상이면 이 테스트는 아무것도 검증하지 않는다"
+    );
+    let meta = engine::futures::executor::block_on(read_cog_meta(MemorySource::new(raw)))
+        .expect("32KiB 미만 COG 도 읽혀야 한다 — EOF 클램프 계약");
+    assert_eq!(meta.levels.len(), 1);
+    assert_eq!((meta.width(), meta.height()), (Some(16), Some(16)));
 }
 
 #[test]

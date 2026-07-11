@@ -30,8 +30,9 @@ def gen_cog(
     count: int = 1,
     dtype: str = "uint16",
     nodata: float | None = 0,
+    blocksize: int = 256,
 ) -> None:
-    """COG 생성: 256px 타일, 자동 오버뷰, EPSG:32652, 10m, seed 고정.
+    """COG 생성: 타일(기본 256px), 자동 오버뷰, EPSG:32652, 10m, seed 고정.
 
     nodata 가 있으면 그 값(관례상 0)은 데이터에서 제외 — 최솟값은 1.
     """
@@ -50,7 +51,7 @@ def gen_cog(
         crs="EPSG:32652",
         transform=from_origin(origin_x, origin_y, 10.0, 10.0),
         nodata=nodata,
-        blocksize=256,
+        blocksize=blocksize,
         compress="NONE",  # 압축 변종은 픽스처 매트릭스(다음)에서 — 여기선 결정성 우선
         overview_resampling="nearest",
     ) as dst:
@@ -65,6 +66,10 @@ FIXTURES = {
     # RS_NumBands·BandNoDataValue 계약 재료 — 3밴드, nodata 미설정 (NULL 경로)
     "multiband_64x64_u8.tif": lambda p: gen_cog(
         p, 64, 64, 600000.0, 3900000.0, count=3, dtype="uint8", nodata=None
+    ),
+    # readahead(초기 32KiB) 초과 요청 케이스 — 파일 전체 < 32KiB (EOF 클램프 계약 재료)
+    "tiny_16x16_u8.tif": lambda p: gen_cog(
+        p, 16, 16, 700000.0, 3950000.0, dtype="uint8", nodata=None, blocksize=128
     ),
 }
 
