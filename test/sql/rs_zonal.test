@@ -1,0 +1,69 @@
+# name: test/sql/rs_zonal.test
+# description: RS_ZonalStats(path, bbox, band, stat) — bbox 영역 집계 (RFC §6.8 Phase 2)
+# group: [cog]
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# 영역: 좌상단 100x100 픽셀 (픽셀 중심 포함 규약) — rasterio+numpy 오라클 수치
+query IIRII
+SELECT RS_ZonalStats(f, [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'count')::BIGINT,
+       RS_ZonalStats(f, [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'sum')::BIGINT,
+       round(RS_ZonalStats(f, [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'mean'), 4),
+       RS_ZonalStats(f, [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'min')::BIGINT,
+       RS_ZonalStats(f, [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'max')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+10000	326869359	32686.9359	17	65532
+
+# 타일 경계(256px)를 걸치는 영역 — 4개 타일에서 모아 집계
+query II
+SELECT RS_ZonalStats(f, [302000.0, 3997000.0, 303000.0, 3998000.0], 1, 'count')::BIGINT,
+       RS_ZonalStats(f, [302000.0, 3997000.0, 303000.0, 3998000.0], 1, 'sum')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+10000	329035529
+
+# nodata 픽셀은 집계에서 제외 (2x2 영역, 구멍 1개 → 유효 3)
+query IIII
+SELECT RS_ZonalStats(f, [900000.0, 3999980.0, 900020.0, 4000000.0], 1, 'count')::BIGINT,
+       RS_ZonalStats(f, [900000.0, 3999980.0, 900020.0, 4000000.0], 1, 'sum')::BIGINT,
+       RS_ZonalStats(f, [900000.0, 3999980.0, 900020.0, 4000000.0], 1, 'min')::BIGINT,
+       RS_ZonalStats(f, [900000.0, 3999980.0, 900020.0, 4000000.0], 1, 'max')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/nodatahole_64x64_u16.tif' AS f);
+----
+3	26257	5849	14370
+
+# 유효 픽셀 없는 영역: count → 0, 나머지 → NULL
+query IR
+SELECT RS_ZonalStats(f, [0.0, 0.0, 1.0, 1.0], 1, 'count')::BIGINT,
+       RS_ZonalStats(f, [0.0, 0.0, 1.0, 1.0], 1, 'mean')
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+0	NULL
+
+# 범위 밖 밴드 → NULL, stat 대소문자 무관
+query RI
+SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300000.0, 3999000.0, 301000.0, 4000000.0], 9, 'mean'),
+       RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'MIN')::BIGINT;
+----
+NULL	17
+
+# 모르는 stat → 에러
+statement error
+SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'median');
+----
+stat
+
+# 역전 bbox → 에러
+statement error
+SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [301000.0, 3999000.0, 300000.0, 4000000.0], 1, 'mean');
+----
+bbox
+
+# NULL 인자 → NULL
+query R
+SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', NULL, 1, 'mean');
+----
+NULL
