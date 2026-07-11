@@ -635,6 +635,116 @@ impl VScalar for RsValues {
     }
 }
 
+/// `RS_ZonalStats(path, bbox DOUBLE[], band, stat)` — bbox 영역 집계 (RFC §6.8).
+/// zone 은 geometry 가 아니라 bbox (GEOS 비링크 N4 하의 적응, 문서화 이탈).
+/// stat ∈ {count, sum, mean, min, max} (대소문자 무관). 유효 픽셀 없으면
+/// count → 0, 나머지 → NULL. NULL 인자 → NULL.
+struct RsZonalStats;
+
+impl VScalar for RsZonalStats {
+    type State = ();
+
+    fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let paths = input.flat_vector(0);
+        // SAFETY: 컬럼 타입은 signatures() 선언(V, LIST(DOUBLE), I, V)과 일치.
+        let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
+        let bnull = input.flat_vector(1);
+        let bl = input.list_vector(1);
+        let bmax = (0..n)
+            .filter(|i| !bnull.row_is_null(*i as u64))
+            .map(|i| {
+                let (o, l) = bl.get_entry(i);
+                o + l
+            })
+            .max()
+            .unwrap_or(0);
+        let bchild = bl.child(bmax);
+        let bvals = unsafe { bchild.as_slice_with_len::<f64>(bmax) };
+        let bandv = input.flat_vector(2);
+        let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
+        let statv = input.flat_vector(3);
+        let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
+
+        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
+        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if paths.row_is_null(i as u64)
+                || bnull.row_is_null(i as u64)
+                || bandv.row_is_null(i as u64)
+                || statv.row_is_null(i as u64)
+            {
+                rows.push(None);
+                continue;
+            }
+            let stat = DuckString::new(&mut { stats[i] }).as_str().to_lowercase();
+            if !matches!(stat.as_str(), "count" | "sum" | "mean" | "min" | "max") {
+                return Err(format!(
+                    "RS_ZonalStats: unknown stat '{stat}' (count/sum/mean/min/max)"
+                )
+                .into());
+            }
+            let (bo, bn) = bl.get_entry(i);
+            if bn != 4 {
+                return Err(format!(
+                    "RS_ZonalStats: bbox must have exactly 4 elements [xmin, ymin, xmax, ymax], got {bn}"
+                )
+                .into());
+            }
+            // 원소 NULL 은 NaN 으로 흘러 engine 검증(비유한)이 에러로 승격하기 전에
+            // 행 NULL 로 처리 (다른 함수들의 NULL 인자 규약과 정합)
+            if (0..4).any(|k| bchild.row_is_null((bo + k) as u64)) {
+                rows.push(None);
+                continue;
+            }
+            let bbox = [bvals[bo], bvals[bo + 1], bvals[bo + 2], bvals[bo + 3]];
+            let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
+            let opened = match cache.get(&path) {
+                Some(o) => Rc::clone(o),
+                None => {
+                    let source = open_source(&path).map_err(|e| format!("RS_ZonalStats: {e}"))?;
+                    let o = engine::futures::executor::block_on(engine::open_cog(source))
+                        .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
+                    let o = Rc::new(o);
+                    cache.insert(path.clone(), Rc::clone(&o));
+                    o
+                }
+            };
+            let (meta, reader) = (&opened.0, &opened.1);
+            let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
+            let z = engine::futures::executor::block_on(reader.zonal_stats(meta, bbox, band))
+                .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
+            rows.push(match stat.as_str() {
+                "count" => Some(z.count as f64),
+                "sum" => (z.count > 0).then_some(z.sum),
+                "mean" => z.mean(),
+                "min" => z.min,
+                "max" => z.max,
+                _ => unreachable!(),
+            });
+        }
+        write_values(&mut output.flat_vector(), &rows);
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        vec![ScalarFunctionSignature::exact(
+            vec![
+                LogicalTypeId::Varchar.into(),
+                LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double)),
+                LogicalTypeId::Integer.into(),
+                LogicalTypeId::Varchar.into(),
+            ],
+            LogicalTypeId::Double.into(),
+        )]
+    }
+}
+
 /// `RS_WorldToRasterCoord(path, x, y)` — 월드 좌표 → 1-based 그리드 STRUCT(col, row).
 /// 순수 변환 (경계 검사 없음, Sedona 준거). NULL 인자 → NULL, georef 없음 → 에러.
 struct RsWorldToRasterCoord;
@@ -836,6 +946,7 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     con.register_scalar_function::<RsValue>("RS_Value")?;
     con.register_scalar_function::<RsValues>("RS_Values")?;
     con.register_scalar_function::<RsNormalizedDifference>("RS_NormalizedDifference")?;
+    con.register_scalar_function::<RsZonalStats>("RS_ZonalStats")?;
     con.register_scalar_function::<RsWorldToRasterCoord>("RS_WorldToRasterCoord")?;
     con.register_scalar_function::<RsRasterToWorldCoord>("RS_RasterToWorldCoord")?;
     Ok(())

@@ -184,7 +184,10 @@ fn zonal_stats_excludes_nodata_and_handles_empty() {
         block_on(open_cog(fixture("nodatahole_64x64_u16.tif"))).expect("valid COG");
     let z = block_on(reader.zonal_stats(&meta, [900000.0, 3999980.0, 900020.0, 4000000.0], 1))
         .expect("io ok");
-    assert_eq!((z.count, z.sum, z.min, z.max), (3, 26_257.0, Some(5849.0), Some(14_370.0)));
+    assert_eq!(
+        (z.count, z.sum, z.min, z.max),
+        (3, 26_257.0, Some(5849.0), Some(14_370.0))
+    );
     // extent 와 교차하지 않는 영역 → 빈 집계
     let empty = block_on(reader.zonal_stats(&meta, [0.0, 0.0, 1.0, 1.0], 1)).expect("io ok");
     assert_eq!((empty.count, empty.min), (0, None));
