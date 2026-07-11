@@ -1,0 +1,54 @@
+# name: test/sql/rs_band_array.test
+# description: RS_BandAsArray(path, band[, bbox]) — 밴드 → DOUBLE[] (row-major, RFC §6.8)
+# group: [cog]
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# 반환 타입
+query T
+SELECT typeof(RS_BandAsArray('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', 1));
+----
+DOUBLE[]
+
+# 전체 밴드 (tiny 16x16): 길이·양끝·합 — rasterio 오라클 수치
+query IRRR
+SELECT len(a), a[1], a[256], list_aggregate(a, 'sum') FROM (SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', 1) AS a);
+----
+256	136.0	247.0	32388.0
+
+# bbox 윈도 (중심 포함, row-major 좌상→우하): multiband band 2, 2x2
+query T
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', 2, [600315.0, 3899675.0, 600325.0, 3899685.0])::VARCHAR;
+----
+[35.0, 29.0, 145.0, 110.0]
+
+# nodata 픽셀은 NULL 원소 (자리 보존)
+query T
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/nodatahole_64x64_u16.tif', 1, [900000.0, 3999980.0, 900020.0, 4000000.0])::VARCHAR;
+----
+[NULL, 5849.0, 14370.0, 6038.0]
+
+# 교차 없는 윈도 → 빈 배열
+query T
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', 1, [0.0, 0.0, 1.0, 1.0])::VARCHAR;
+----
+[]
+
+# 범위 밖 밴드 → NULL (빈 배열 아님)
+query T
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', 9) IS NULL;
+----
+true
+
+# NULL 인자 → NULL, 역전 bbox → 에러
+query T
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', NULL::INTEGER) IS NULL;
+----
+true
+
+statement error
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', 1, [1.0, 0.0, 0.0, 1.0]);
+----
+bbox

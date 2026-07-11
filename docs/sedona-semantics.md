@@ -45,6 +45,7 @@ RFC §6.8/R10: Apache Sedona `RS_*` 카탈로그는 **참조이지 계약이 아
 | `RS_WorldToRasterCoord(path, x, y)` | STRUCT(col, row) INTEGER | NULL 인자 → NULL | 1-based, 순수 변환(경계 검사 없음 — extent 밖도 환산). i32 초과 좌표는 NULL. georef 없음 → 에러 |
 | `RS_RasterToWorldCoord(path, col, row)` | STRUCT(x, y) DOUBLE | NULL 인자 → NULL | 1-based 픽셀의 **좌상단 코너** 좌표. georef 없음 → 에러 |
 | `RS_Values(path, xs DOUBLE[], ys DOUBLE[][, band])` | DOUBLE[] | 리스트 인자 NULL → NULL; 원소 NULL·extent 밖·nodata → 그 원소만 NULL | Sedona 는 Point geometry 배열 — 우리는 좌표 배열 쌍(geometry 타입 부재). xs/ys 길이 불일치 → 에러. 같은 타일 점들은 1회 fetch+decode |
+| `RS_BandAsArray(path, band[, bbox DOUBLE[]])` | DOUBLE[] | 범위 밖 밴드·NULL 인자 → NULL (빈 배열과 구분); nodata → NULL **원소** | bbox 없으면 전체 level 0 밴드(georef 불요 — **통째 실체화되므로 대형 COG 는 bbox 윈도 권장**), 있으면 픽셀 중심 포함 윈도 (zonal 과 동일 규약 — Sedona 에 없는 windowed 확장). row-major (좌상→우하) |
 | `RS_ZonalStats(path, bbox DOUBLE[], band, stat)` | DOUBLE | NULL 인자·bbox 원소 NULL → NULL; 유효 픽셀 없음 → count 0, 나머지 NULL | **의도적 이탈**: zone 은 geometry 가 아니라 bbox (GEOS 비링크 N4). 픽셀 **중심** 포함 규약(닫힌 구간 — 공유 경계 위 중심은 이웃 zone 양쪽에 포함), nodata 제외. 범위 밖 밴드도 빈 집계와 동일 (count 0 / 나머지 NULL — RS_Value 의 NULL 과 비대칭, 의도). stat ∈ count/sum/mean/min/max (대소문자 무관); 모르는 stat·bbox 형식 오류 → 에러 |
 | `RS_NormalizedDifference(path, x, y, b1, b2)` | DOUBLE | 결측(extent 밖·nodata·범위 밖 밴드)·**합 0**(0/0 정의 불가)·NULL 인자 → NULL | **의도적 이탈**: Sedona 는 raster 반환 — 우리는 reader(N3)라 포인트 값 연산. (v2−v1)/(v2+v1). Float 래스터의 NaN 픽셀은 nodata=NaN 이 아니면 NaN 으로 전파 |
 
@@ -54,7 +55,7 @@ RFC §6.8/R10: Apache Sedona `RS_*` 카탈로그는 **참조이지 계약이 아
 
 ## Phase 2 잔여 (미구현)
 
-`RS_BandAsArray` — RFC §6.8 표 참조. 래스터
+`read_stac()` (테이블 함수, §6.7) 이 마지막 표면. 래스터
 생성/변형 함수군(`RS_MakeRaster`, `RS_Resample` 등)은 명시적 범위 밖 (N3).
 
 ## 판정

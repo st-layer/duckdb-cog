@@ -35,6 +35,7 @@ Early Phase 1 — the metadata surface is functional; pixel access is next.
 | `RS_Values` batch pixel access (per-tile single fetch+decode) | ✅ |
 | `RS_NormalizedDifference` (point-form band math, NDVI-style) | ✅ |
 | `RS_ZonalStats` (bbox zones, count/sum/mean/min/max) | ✅ |
+| `RS_BandAsArray` (full band or bbox window, row-major) | ✅ |
 | `read_stac()` | Phase 2 |
 
 ## SQL surface
