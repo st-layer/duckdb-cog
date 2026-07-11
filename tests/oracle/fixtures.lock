@@ -1,6 +1,9 @@
 {
   "basic_512x512_u16.tif": "9bf36fd1beb0a7b84c51f0dfca663b6e6728bad207d45cec34bf5067c942a305",
+  "deflate_128x128_u16.tif": "44fdc0a21fa5cc81eabd1f1ab9af3f27deddcd897541bbd342fa8b934c4fd6da",
   "edge_400x300_u16.tif": "df7793cc8ea433dddaf8ae90ec098e70827ee173d4bf713b9bbf64706f8759ff",
   "multiband_64x64_u8.tif": "d141352776b73aea278ab5199f5f7d24412b3afe83980a73cf78389b65b27d09",
-  "tiny_16x16_u8.tif": "eac00ed3f10ce1abf96177db67175b5f049ed6247d4c50b06bfb314a3c8c8bfb"
+  "nodatahole_64x64_u16.tif": "bee2ac672004c144ce357b492dd6d03b1fa7cc7ddeeda77692bbf17bd0c62ad3",
+  "tiny_16x16_u8.tif": "eac00ed3f10ce1abf96177db67175b5f049ed6247d4c50b06bfb314a3c8c8bfb",
+  "zstd_128x128_u16.tif": "b49e9fbe075a322f02f6b7cdee497c522471eacd4de906122af4f4104670bfbb"
 }
