@@ -201,3 +201,32 @@ fn zonal_stats_excludes_nodata_and_handles_empty() {
         "역전 bbox 는 에러"
     );
 }
+
+/// 밴드 → 배열: row-major, nodata None 원소, 빈 윈도/범위 밖 밴드 구분.
+#[test]
+fn band_window_contract() {
+    let (meta, reader) = block_on(open_cog(fixture("tiny_16x16_u8.tif"))).expect("valid COG");
+    let full = block_on(reader.band_window(&meta, None, 1))
+        .expect("io ok")
+        .expect("밴드 유효");
+    assert_eq!(full.len(), 256);
+    assert_eq!((full[0], full[255]), (Some(136.0), Some(247.0)));
+    // 범위 밖 밴드 → None (SQL NULL), 빈 배열과 구분
+    assert!(block_on(reader.band_window(&meta, None, 9))
+        .expect("io ok")
+        .is_none());
+
+    let (meta, reader) =
+        block_on(open_cog(fixture("nodatahole_64x64_u16.tif"))).expect("valid COG");
+    let w = block_on(reader.band_window(&meta, Some([900000.0, 3999980.0, 900020.0, 4000000.0]), 1))
+        .expect("io ok")
+        .expect("밴드 유효");
+    assert_eq!(w, vec![None, Some(5849.0), Some(14370.0), Some(6038.0)]);
+    // 교차 없음 → 빈 배열
+    let empty = block_on(reader.band_window(&meta, Some([0.0, 0.0, 1.0, 1.0]), 1))
+        .expect("io ok")
+        .expect("밴드 유효");
+    assert!(empty.is_empty());
+    // 역전 bbox → 에러
+    assert!(block_on(reader.band_window(&meta, Some([1.0, 0.0, 0.0, 1.0]), 1)).is_err());
+}
