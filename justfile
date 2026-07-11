@@ -44,13 +44,19 @@ ext-test: ext fixtures
     #!/usr/bin/env bash
     set -euo pipefail
     port=18923
-    (cd test/data/generated && exec uv run --project ../../.. python -m RangeHTTPServer "$port") >/dev/null 2>&1 &
+    (cd test/data/generated && exec uv run --project ../../.. python -m RangeHTTPServer "$port") >/tmp/cog-range-server.log 2>&1 &
     srv=$!
-    trap 'kill "$srv" 2>/dev/null || true' EXIT
+    # uv 의 python 자식까지 정리 — 살아남은 자식이 포트를 점유하면 다음 실행이 깨진다
+    trap 'pkill -P "$srv" 2>/dev/null || true; kill "$srv" 2>/dev/null || true' EXIT
+    ready=0
     for _ in $(seq 50); do
-        curl -sf -o /dev/null "http://127.0.0.1:$port/" && break
+        curl -sf -o /dev/null "http://127.0.0.1:$port/" && ready=1 && break
         sleep 0.1
     done
+    if [ "$ready" != 1 ]; then
+        echo "FAIL: range 서버가 :$port 에서 안 뜸 (포트 점유? /tmp/cog-range-server.log 확인)" >&2
+        exit 1
+    fi
     COG_TEST_FIXTURES=test/data/generated COG_TEST_HTTP="http://127.0.0.1:$port" make test_debug
 
 # 엔진 wasm32-unknown-unknown 컴파일 판정 (RFC G8) — rustup 환경 필요, CI 상시 실행.

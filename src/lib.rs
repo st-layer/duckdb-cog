@@ -113,13 +113,15 @@ impl engine::ByteSource for FileSource {
         use std::io::{Read, Seek, SeekFrom};
         Box::pin(async move {
             let err = |msg: String| engine::SourceError(format!("{}: {msg}", self.path));
-            if range.start > range.end || range.end > self.len {
+            if range.start > range.end || range.start >= self.len {
                 return Err(err(format!(
                     "range {}..{} out of bounds (file len {})",
                     range.start, range.end, self.len
                 )));
             }
-            let mut buf = vec![0u8; (range.end - range.start) as usize];
+            // EOF 클램프 (ByteSource 계약): end 만 넘으면 가용 분 반환
+            let end = range.end.min(self.len);
+            let mut buf = vec![0u8; (end - range.start) as usize];
             let mut file = self.file.lock().map_err(|e| err(e.to_string()))?;
             file.seek(SeekFrom::Start(range.start))
                 .and_then(|_| file.read_exact(&mut buf))
@@ -142,6 +144,9 @@ struct ObjectStoreSource {
     location: object_store::path::Path,
 }
 
+/// 익스텐션 수명의 tokio 런타임 — 의도적으로 leak (unload 시 drop 하면
+/// blocking 컨텍스트 panic; DuckDB 는 사실상 프로세스 종료까지 unload 안 함).
+/// worker 1개 = 동시 원격 쿼리의 처리량 상한 — 병목 실측 후 조정 (worklog 참조).
 #[cfg(not(target_os = "emscripten"))]
 fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
@@ -159,6 +164,9 @@ impl ObjectStoreSource {
     fn open(url_str: &str) -> std::result::Result<Self, String> {
         let err = |e: &dyn std::fmt::Display| format!("cannot open '{url_str}': {e}");
         let url = url::Url::parse(url_str).map_err(|e| err(&e))?;
+        // 전체 env 전달은 object_store 의 문서화된 관례 (AWS_* 자격증명 등) —
+        // 인식 안 되는 키는 조용히 무시된다. http 엔드포인트의 s3(minio 등)는
+        // AWS_ALLOW_HTTP=true 를 env 로 줘야 한다.
         let mut opts: Vec<(String, String)> = std::env::vars().collect();
         if url.scheme() == "http" {
             // object_store 는 기본 HTTPS-only ("URL scheme is not allowed") —
@@ -199,6 +207,8 @@ impl engine::ByteSource for ObjectStoreSource {
 
 /// 경로 스킴에 따라 로컬/원격 소스를 연다 — read_cog · RS_ 공용 진입점.
 /// 에러 문자열에는 함수명 접두어가 없다 (호출측이 붙인다).
+/// `file://` 도 object_store(LocalFileSystem) 로 간다 — 절대경로 요구 등
+/// 의미론이 FileSource(스킴 없는 경로)와 다름에 유의.
 #[cfg(not(target_os = "emscripten"))]
 fn open_source(path: &str) -> std::result::Result<Box<dyn engine::ByteSource>, String> {
     if path.contains("://") {
