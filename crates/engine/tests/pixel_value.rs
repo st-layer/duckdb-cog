@@ -106,10 +106,8 @@ fn batch_fetches_each_tile_once() {
         fn fetch(
             &self,
             range: std::ops::Range<u64>,
-        ) -> engine::futures::future::BoxFuture<
-            '_,
-            Result<engine::bytes::Bytes, engine::SourceError>,
-        > {
+        ) -> engine::futures::future::BoxFuture<'_, Result<engine::bytes::Bytes, engine::SourceError>>
+        {
             self.fetches.fetch_add(1, Ordering::Relaxed);
             self.inner.fetch(range)
         }
