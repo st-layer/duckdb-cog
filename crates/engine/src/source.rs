@@ -18,6 +18,13 @@ pub trait ByteSource: Debug + Send + Sync + 'static {
     fn fetch(&self, range: Range<u64>) -> BoxFuture<'_, Result<Bytes, SourceError>>;
 }
 
+/// 소스 구현을 런타임에 고르는 호출자(스킴 디스패치)를 위한 boxed 위임.
+impl ByteSource for Box<dyn ByteSource> {
+    fn fetch(&self, range: Range<u64>) -> BoxFuture<'_, Result<Bytes, SourceError>> {
+        (**self).fetch(range)
+    }
+}
+
 /// [`ByteSource`] 구현이 반환하는 에러 (경로/원인 문자열 포함).
 #[derive(Debug)]
 pub struct SourceError(pub String);

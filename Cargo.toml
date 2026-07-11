@@ -27,6 +27,11 @@ duckdb = { version = "~1.10504.0", features = ["loadable-extension", "vscalar"] 
 # read_cog 는 DuckDB-Wasm 빌드에서 제외 (RFC 사이드카 결정과 일관, worklog 참조).
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 engine = { path = "crates/engine" }
+# 원격 IO: object_store 직행 (RFC §6.5 (a)) — http(s)/s3. async-tiff 와 동일 계열 버전.
+object_store = { version = "0.13", features = ["http", "aws"] }
+url = "2"
+# object_store(reqwest) future 는 tokio reactor 가 필요 — 익스텐션 수명에 묶인 런타임 1개.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 engine = { path = "crates/engine", default-features = false }
