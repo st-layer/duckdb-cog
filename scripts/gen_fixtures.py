@@ -21,34 +21,51 @@ OUT_DIR = ROOT / "test" / "data" / "generated"
 LOCK = ROOT / "tests" / "oracle" / "fixtures.lock"
 
 
-def gen_cog_u16(path: Path, width: int, height: int, origin_x: float, origin_y: float) -> None:
-    """단일밴드 uint16 COG: 256px 타일, 자동 오버뷰, EPSG:32652, 10m, seed 고정."""
+def gen_cog(
+    path: Path,
+    width: int,
+    height: int,
+    origin_x: float,
+    origin_y: float,
+    count: int = 1,
+    dtype: str = "uint16",
+    nodata: float | None = 0,
+) -> None:
+    """COG 생성: 256px 타일, 자동 오버뷰, EPSG:32652, 10m, seed 고정.
+
+    nodata 가 있으면 그 값(관례상 0)은 데이터에서 제외 — 최솟값은 1.
+    """
     rng = np.random.default_rng(42)
-    # 0 은 nodata 로 예약 — 데이터 값은 1..65535
-    data = rng.integers(1, 65536, size=(height, width), dtype=np.uint16)
+    dt = np.dtype(dtype)
+    low = 0 if nodata is None else 1
+    data = rng.integers(low, np.iinfo(dt).max + 1, size=(count, height, width), dtype=dt)
     with rasterio.open(
         path,
         "w",
         driver="COG",
         width=width,
         height=height,
-        count=1,
-        dtype="uint16",
+        count=count,
+        dtype=dtype,
         crs="EPSG:32652",
         transform=from_origin(origin_x, origin_y, 10.0, 10.0),
-        nodata=0,
+        nodata=nodata,
         blocksize=256,
         compress="NONE",  # 압축 변종은 픽스처 매트릭스(다음)에서 — 여기선 결정성 우선
         overview_resampling="nearest",
     ) as dst:
-        dst.write(data, 1)
+        dst.write(data)
 
 
 FIXTURES = {
     # 타일 크기로 나누어떨어지는 기본 케이스
-    "basic_512x512_u16.tif": lambda p: gen_cog_u16(p, 512, 512, 300000.0, 4000000.0),
+    "basic_512x512_u16.tif": lambda p: gen_cog(p, 512, 512, 300000.0, 4000000.0),
     # 엣지 클리핑 케이스 — 400x300 은 256 으로 나누어떨어지지 않음
-    "edge_400x300_u16.tif": lambda p: gen_cog_u16(p, 400, 300, 500000.0, 3800000.0),
+    "edge_400x300_u16.tif": lambda p: gen_cog(p, 400, 300, 500000.0, 3800000.0),
+    # RS_NumBands·BandNoDataValue 계약 재료 — 3밴드, nodata 미설정 (NULL 경로)
+    "multiband_64x64_u8.tif": lambda p: gen_cog(
+        p, 64, 64, 600000.0, 3900000.0, count=3, dtype="uint8", nodata=None
+    ),
 }
 
 

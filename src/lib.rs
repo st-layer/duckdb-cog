@@ -17,6 +17,14 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+/// RS_* 메타데이터 접근자 스칼라 함수 (RFC §6.8 Phase 1).
+/// include!: wasm 우회 빌드(example)가 lib.rs 를 비루트 모듈로 포함하면 `mod x;` 의
+/// 파일 해석 경로가 갈라진다 — include! 는 이 파일 기준 상대경로라 양쪽에서 동작.
+#[cfg(not(target_os = "emscripten"))]
+mod rs_meta {
+    include!("rs_meta.rs");
+}
+
 #[repr(C)]
 struct VersionBindData;
 
@@ -269,6 +277,9 @@ impl VTab for ReadCogVTab {
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<VersionVTab>("cog_version")?;
     #[cfg(not(target_os = "emscripten"))]
-    con.register_table_function::<ReadCogVTab>("read_cog")?;
+    {
+        con.register_table_function::<ReadCogVTab>("read_cog")?;
+        rs_meta::register(&con)?;
+    }
     Ok(())
 }
