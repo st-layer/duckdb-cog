@@ -5,7 +5,8 @@
 //! 않고, 인접 타일은 정확히 이어지며, 키 왕복은 항등".
 
 use engine::{
-    enumerate_tiles, pack_tile_key, unpack_tile_key, CogMeta, Georef, LevelMeta, MAX_TILE_INDEX,
+    enumerate_tiles, enumerate_tiles_filtered, pack_tile_key, unpack_tile_key, CogMeta, Georef,
+    LevelMeta, MAX_TILE_INDEX,
 };
 use proptest::prelude::*;
 
@@ -114,4 +115,67 @@ proptest! {
         let m = meta(w, h, 256, 256, None);
         prop_assert!(enumerate_tiles(&m).all(|r| r.bbox.is_none()));
     }
+
+    /// RFC §6.9 T4 원문 그대로: "임의 bbox 에 대해 (pushdown 결과) ⊆ (전체 스캔 후
+    /// 필터 결과)이며 두 집합은 동일". 교차 판정은 테스트가 독립적으로 재유도한다 —
+    /// 향후 Hilbert/Morton pruning(§6.6) 최적화가 들어와도 이 성질은 유지돼야 한다.
+    #[test]
+    fn bbox_pushdown_equals_full_scan_then_filter(
+        w in 1u32..3000, h in 1u32..3000,
+        tw in prop::sample::select(vec![128u32, 256, 512]),
+        ox in -1.0e6f64..1.0e6, oy in -1.0e6f64..1.0e6,
+        px in 0.1f64..100.0,
+        // extent 안팎을 두루 찍도록 필터 코너를 extent 비율로 뽑는다 (밖 포함 -0.5..1.5)
+        fx0 in -0.5f64..1.5, fy0 in -0.5f64..1.5,
+        fdx in 0.0f64..1.0, fdy in 0.0f64..1.0,
+    ) {
+        let g = Georef { epsg: None, origin_x: ox, origin_y: oy, pixel_x: px, pixel_y: px };
+        let m = meta(w, h, tw, tw, Some(g));
+        let (ew, eh) = (w as f64 * px, h as f64 * px);
+        let f = [
+            ox + fx0 * ew,
+            oy - eh + fy0 * eh,
+            ox + (fx0 + fdx) * ew,
+            oy - eh + (fy0 + fdy) * eh,
+        ];
+        // 독립 재유도한 닫힌 교차 술어 (구현과 별개 식)
+        let hits = |b: [f64; 4]| !(b[2] < f[0] || b[0] > f[2] || b[3] < f[1] || b[1] > f[3]);
+        let pushed = enumerate_tiles_filtered(&m, Some(f)).expect("유효 필터");
+        let scanned: Vec<_> = enumerate_tiles(&m)
+            .filter(|r| r.bbox.is_some_and(hits))
+            .collect();
+        prop_assert_eq!(pushed, scanned);
+    }
+
+    /// 필터 없음(None)은 전체 열거와 동일.
+    #[test]
+    fn no_filter_equals_full_enumeration(w in 1u32..2000, h in 1u32..2000) {
+        let g = Georef { epsg: None, origin_x: 0.0, origin_y: 0.0, pixel_x: 1.0, pixel_y: 1.0 };
+        let m = meta(w, h, 256, 256, Some(g));
+        let full: Vec<_> = enumerate_tiles(&m).collect();
+        prop_assert_eq!(enumerate_tiles_filtered(&m, None).expect("필터 없음"), full);
+    }
+}
+
+/// 필터 오류 경로 — 예시 기반이 더 명료한 계약들.
+#[test]
+fn bbox_filter_error_paths() {
+    let g = Georef {
+        epsg: None,
+        origin_x: 0.0,
+        origin_y: 0.0,
+        pixel_x: 1.0,
+        pixel_y: 1.0,
+    };
+    let with_geo = meta(512, 512, 256, 256, Some(g));
+    let no_geo = meta(512, 512, 256, 256, None);
+    // georef 없는 파일에 bbox 필터 → 명시적 에러 (0행 침묵 금지)
+    assert!(enumerate_tiles_filtered(&no_geo, Some([0.0, 0.0, 1.0, 1.0])).is_err());
+    // min > max 역전 → 에러
+    assert!(enumerate_tiles_filtered(&with_geo, Some([1.0, 0.0, 0.0, 1.0])).is_err());
+    assert!(enumerate_tiles_filtered(&with_geo, Some([0.0, 1.0, 1.0, 0.0])).is_err());
+    // 비유한값 → 에러
+    assert!(enumerate_tiles_filtered(&with_geo, Some([f64::NAN, 0.0, 1.0, 1.0])).is_err());
+    // 퇴화(점/선) bbox 는 허용 — 닫힌 교차라 의미 있음
+    assert!(enumerate_tiles_filtered(&with_geo, Some([10.0, -10.0, 10.0, -10.0])).is_ok());
 }
