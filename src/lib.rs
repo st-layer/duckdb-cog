@@ -281,6 +281,9 @@ impl VTab for ReadCogVTab {
                     )
                     .into());
                 }
+                // to_double 은 타입 검사 없이 실패 시 NaN — named_parameters() 의
+                // LIST(DOUBLE) 선언이 캐스팅을 보장하고, NULL 원소의 NaN 은
+                // engine 의 is_finite 검증이 거른다 (선언 타입 바꾸면 같이 볼 것).
                 let f: Vec<f64> = items.iter().map(|x| x.to_double()).collect();
                 Some([f[0], f[1], f[2], f[3]])
             }

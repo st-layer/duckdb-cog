@@ -278,7 +278,7 @@ pub fn enumerate_tiles_filtered(
     };
     if !f.iter().all(|v| v.is_finite()) || f[0] > f[2] || f[1] > f[3] {
         return Err(MetaError::InvalidFilter(format!(
-            "[{}, {}, {}, {}] — 유한값이며 xmin<=xmax, ymin<=ymax 여야 한다",
+            "[{}, {}, {}, {}] must be finite with xmin<=xmax and ymin<=ymax",
             f[0], f[1], f[2], f[3]
         )));
     }
