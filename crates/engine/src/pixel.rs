@@ -62,6 +62,8 @@ impl<S: ByteSource> CogReader<S> {
     ///
     /// 같은 타일의 점들은 타일을 **한 번만** fetch+decode 한다 — 유일 타일 목록을
     /// `fetch_tiles` 로 병합 요청 (pixel_value.rs 의 fetch-1회 계약이 회귀 감시).
+    /// 메모리 트레이드오프: 호출 하나가 건드린 유일 타일들의 디코드 결과를 동시에
+    /// 들고 있는다 — 비용은 리스트가 스치는 타일 수에 비례 (고정 상한 아님).
     pub async fn read_pixels(
         &self,
         meta: &CogMeta,
