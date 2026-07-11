@@ -70,3 +70,20 @@ statement error
 SELECT RS_Value('${COG_TEST_FIXTURES}/no_such.tif', 0.0, 0.0);
 ----
 no_such.tif
+
+# ---- 압축 변종: DEFLATE/ZSTD decode 경로 (동일 seed → 동일 값, rasterio 오라클) ----
+query II
+SELECT RS_Value(f, 800005.0, 3999995.0)::BIGINT, RS_Value(f, 801275.0, 3998725.0)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/deflate_128x128_u16.tif' AS f);
+----
+9864	57860
+
+query II
+SELECT RS_Value(f, 800005.0, 3999995.0)::BIGINT, RS_Value(f, 801275.0, 3998725.0)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/zstd_128x128_u16.tif' AS f);
+----
+9864	57860
+
+# ---- nodata 구멍: (0,0) 픽셀 raw 값은 0 이지만 nodata=0 → NULL, 이웃은 값 ----
+query II
+SELECT RS_Value(f, 900005.0, 3999995.0), RS_Value(f, 900015.0, 3999995.0)::BIGINT FROM (SELECT '${COG_TEST_FIXTURES}/nodatahole_64x64_u16.tif' AS f);
+----
+NULL	5849

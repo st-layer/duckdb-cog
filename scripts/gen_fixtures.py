@@ -31,15 +31,28 @@ def gen_cog(
     dtype: str = "uint16",
     nodata: float | None = 0,
     blocksize: int = 256,
+    compress: str = "NONE",
+    plant_nodata_at: tuple[int, int] | None = None,
 ) -> None:
     """COG 생성: 타일(기본 256px), 자동 오버뷰, EPSG:32652, 10m, seed 고정.
 
     nodata 가 있으면 그 값(관례상 0)은 데이터에서 제외 — 최솟값은 1.
+    plant_nodata_at=(row, col) 은 그 픽셀에 nodata 를 실제로 심는다
+    (RS_Value nodata→NULL E2E 재료).
+
+    압축 출력의 결정성 주의: rasterio 휠은 플랫폼별로 각자 빌드된 libdeflate/
+    libzstd 를 번들한다 — 같은 버전 핀이라도 mac↔linux 바이트 동일성은 보장이
+    아니라 **CI(ubuntu)가 실측 판정**하는 가정이다. 해시 불일치가 나면 압축
+    픽스처는 lock 해시 대신 decoded-픽셀 값 검증으로 전환한다 (리뷰 기록 참조).
     """
     rng = np.random.default_rng(42)
     dt = np.dtype(dtype)
     low = 0 if nodata is None else 1
     data = rng.integers(low, np.iinfo(dt).max + 1, size=(count, height, width), dtype=dt)
+    if plant_nodata_at is not None:
+        assert nodata is not None, "구멍을 심으려면 nodata 가 있어야 한다"
+        r, c = plant_nodata_at
+        data[:, r, c] = nodata
     with rasterio.open(
         path,
         "w",
@@ -52,7 +65,7 @@ def gen_cog(
         transform=from_origin(origin_x, origin_y, 10.0, 10.0),
         nodata=nodata,
         blocksize=blocksize,
-        compress="NONE",  # 압축 변종은 픽스처 매트릭스(다음)에서 — 여기선 결정성 우선
+        compress=compress,
         overview_resampling="nearest",
     ) as dst:
         dst.write(data)
@@ -70,6 +83,17 @@ FIXTURES = {
     # readahead(초기 32KiB) 초과 요청 케이스 — 파일 전체 < 32KiB (EOF 클램프 계약 재료)
     "tiny_16x16_u8.tif": lambda p: gen_cog(
         p, 16, 16, 700000.0, 3950000.0, dtype="uint8", nodata=None, blocksize=128
+    ),
+    # ---- 매트릭스: 압축 변종 (decode 경로 T2 축) + nodata 구멍 ----
+    "deflate_128x128_u16.tif": lambda p: gen_cog(
+        p, 128, 128, 800000.0, 4000000.0, blocksize=128, compress="DEFLATE"
+    ),
+    "zstd_128x128_u16.tif": lambda p: gen_cog(
+        p, 128, 128, 800000.0, 4000000.0, blocksize=128, compress="ZSTD"
+    ),
+    # (0,0) 에 nodata=0 을 실제로 심음 — RS_Value NULL E2E 의 유일한 재료
+    "nodatahole_64x64_u16.tif": lambda p: gen_cog(
+        p, 64, 64, 900000.0, 4000000.0, blocksize=128, plant_nodata_at=(0, 0)
     ),
 }
 
