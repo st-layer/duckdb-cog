@@ -157,6 +157,44 @@ proptest! {
     }
 }
 
+proptest! {
+    /// 좌표 왕복 (RFC §6.9 T4 유사): raster→world 코너에 픽셀 내부 오프셋을 더한
+    /// 점은 같은 픽셀로 돌아온다. **정확한 코너의 항등은 임의 실수 해상도에선
+    /// 부동소수로 보장 불가** (예: 50422*py/py < 50422) — rasterio 도 동일한 float
+    /// 의미론이라 스냅 보정 없이 그대로 둔다 (T1 오라클 정합 우선). 코너 항등은
+    /// 아래 정수 격자 프로퍼티가 보장한다.
+    #[test]
+    fn coord_roundtrip_interior_points(
+        col in 1i64..100_000, row in 1i64..100_000,
+        ox in -1.0e6f64..1.0e6, oy in -1.0e6f64..1.0e6,
+        px in 0.1f64..100.0, py in 0.1f64..100.0,
+        fx in 0.01f64..0.99, fy in 0.01f64..0.99,
+    ) {
+        let g = Georef { epsg: None, origin_x: ox, origin_y: oy, pixel_x: px, pixel_y: py };
+        let (wx, wy) = g.raster_to_world(col, row);
+        let (ix, iy) = (wx + fx * px, wy - fy * py);
+        prop_assert_eq!(g.world_to_raster(ix, iy), (col, row), "내부점 왕복");
+    }
+
+    /// 정수 origin·해상도(우리 픽스처 계열, 위성영상 관행)에서는 코너 왕복도 항등.
+    #[test]
+    fn coord_roundtrip_exact_on_integer_grids(
+        col in 1i64..1_000_000, row in 1i64..1_000_000,
+        ox in -1_000_000i64..1_000_000, oy in -1_000_000i64..1_000_000,
+        px in 1i64..1000, py in 1i64..1000,
+    ) {
+        let g = Georef {
+            epsg: None,
+            origin_x: ox as f64,
+            origin_y: oy as f64,
+            pixel_x: px as f64,
+            pixel_y: py as f64,
+        };
+        let (wx, wy) = g.raster_to_world(col, row);
+        prop_assert_eq!(g.world_to_raster(wx, wy), (col, row), "정수 격자 코너 왕복");
+    }
+}
+
 /// 필터 오류 경로 — 예시 기반이 더 명료한 계약들.
 #[test]
 fn bbox_filter_error_paths() {

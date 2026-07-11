@@ -385,6 +385,143 @@ impl VScalar for RsValue {
     }
 }
 
+/// `RS_WorldToRasterCoord(path, x, y)` — 월드 좌표 → 1-based 그리드 STRUCT(col, row).
+/// 순수 변환 (경계 검사 없음, Sedona 준거). NULL 인자 → NULL, georef 없음 → 에러.
+struct RsWorldToRasterCoord;
+
+impl VScalar for RsWorldToRasterCoord {
+    type State = ();
+
+    fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let metas = meta_per_row("RS_WorldToRasterCoord", input)?;
+        let n = input.len();
+        let xv = input.flat_vector(1);
+        // SAFETY: 컬럼 1/2 는 DOUBLE 로 선언 — f64 표현.
+        let xs = unsafe { xv.as_slice_with_len::<f64>(n) };
+        let yv = input.flat_vector(2);
+        let ys = unsafe { yv.as_slice_with_len::<f64>(n) };
+        let mut rows: Vec<Option<(i64, i64)>> = Vec::with_capacity(n);
+        for (i, m) in metas.iter().enumerate() {
+            if xv.row_is_null(i as u64) || yv.row_is_null(i as u64) {
+                rows.push(None);
+                continue;
+            }
+            match m.as_deref() {
+                None => rows.push(None),
+                Some(meta) => {
+                    let g = meta.georef.as_ref().ok_or_else(|| {
+                        "RS_WorldToRasterCoord: coordinate lookup requires a georeferenced COG"
+                            .to_string()
+                    })?;
+                    rows.push(Some(g.world_to_raster(xs[i], ys[i])));
+                }
+            }
+        }
+        // i32 초과 좌표는 부분-NULL 대신 **struct 전체 NULL** (계약 단순화)
+        let rows: Vec<Option<(i32, i32)>> = rows
+            .iter()
+            .map(|r| {
+                r.and_then(|(c, w)| Some((i32::try_from(c).ok()?, i32::try_from(w).ok()?)))
+            })
+            .collect();
+        let mut sv = output.struct_vector();
+        for ci in 0..2usize {
+            let vals: Vec<Option<i32>> = rows
+                .iter()
+                .map(|r| r.map(|cr| if ci == 0 { cr.0 } else { cr.1 }))
+                .collect();
+            write_values(&mut sv.child(ci, n), &vals);
+        }
+        for (i, r) in rows.iter().enumerate() {
+            if r.is_none() {
+                sv.set_null(i);
+            }
+        }
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        let d = || LogicalTypeHandle::from(LogicalTypeId::Double);
+        vec![ScalarFunctionSignature::exact(
+            vec![LogicalTypeId::Varchar.into(), d(), d()],
+            LogicalTypeHandle::struct_type(&[
+                ("col", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+                ("row", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+            ]),
+        )]
+    }
+}
+
+/// `RS_RasterToWorldCoord(path, col, row)` — 1-based 픽셀 좌상단 코너의 월드 좌표
+/// STRUCT(x, y). NULL 인자 → NULL, georef 없음 → 에러.
+struct RsRasterToWorldCoord;
+
+impl VScalar for RsRasterToWorldCoord {
+    type State = ();
+
+    fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let metas = meta_per_row("RS_RasterToWorldCoord", input)?;
+        let n = input.len();
+        let cv = input.flat_vector(1);
+        // SAFETY: 컬럼 1/2 는 INTEGER 로 선언 — i32 표현.
+        let cols = unsafe { cv.as_slice_with_len::<i32>(n) };
+        let rv = input.flat_vector(2);
+        let rws = unsafe { rv.as_slice_with_len::<i32>(n) };
+        let mut rows: Vec<Option<(f64, f64)>> = Vec::with_capacity(n);
+        for (i, m) in metas.iter().enumerate() {
+            if cv.row_is_null(i as u64) || rv.row_is_null(i as u64) {
+                rows.push(None);
+                continue;
+            }
+            match m.as_deref() {
+                None => rows.push(None),
+                Some(meta) => {
+                    let g = meta.georef.as_ref().ok_or_else(|| {
+                        "RS_RasterToWorldCoord: coordinate lookup requires a georeferenced COG"
+                            .to_string()
+                    })?;
+                    rows.push(Some(
+                        g.raster_to_world(i64::from(cols[i]), i64::from(rws[i])),
+                    ));
+                }
+            }
+        }
+        let mut sv = output.struct_vector();
+        for ci in 0..2usize {
+            let vals: Vec<Option<f64>> = rows
+                .iter()
+                .map(|r| r.map(|xy| if ci == 0 { xy.0 } else { xy.1 }))
+                .collect();
+            write_values(&mut sv.child(ci, n), &vals);
+        }
+        for (i, r) in rows.iter().enumerate() {
+            if r.is_none() {
+                sv.set_null(i);
+            }
+        }
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        let i = || LogicalTypeHandle::from(LogicalTypeId::Integer);
+        vec![ScalarFunctionSignature::exact(
+            vec![LogicalTypeId::Varchar.into(), i(), i()],
+            LogicalTypeHandle::struct_type(&[
+                ("x", LogicalTypeHandle::from(LogicalTypeId::Double)),
+                ("y", LogicalTypeHandle::from(LogicalTypeId::Double)),
+            ]),
+        )]
+    }
+}
+
 /// RS_* 전 함수 등록 — extension_entrypoint 에서 호출.
 pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     let int_fns: [MetaFn<i32>; 4] = [
@@ -447,5 +584,7 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     con.register_scalar_function::<RsBandNoDataValue>("RS_BandNoDataValue")?;
     con.register_scalar_function::<RsMetaData>("RS_MetaData")?;
     con.register_scalar_function::<RsValue>("RS_Value")?;
+    con.register_scalar_function::<RsWorldToRasterCoord>("RS_WorldToRasterCoord")?;
+    con.register_scalar_function::<RsRasterToWorldCoord>("RS_RasterToWorldCoord")?;
     Ok(())
 }

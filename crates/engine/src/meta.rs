@@ -103,6 +103,26 @@ impl Georef {
     pub fn skew(&self) -> (f64, f64) {
         (0.0, 0.0)
     }
+
+    /// 월드 좌표 → **1-based** 그리드 (col, row) — Sedona 규약 (RFC §6.8).
+    ///
+    /// 순수 변환: 경계 검사 없음 (extent 밖은 0 이하/초과 좌표로 환산).
+    /// floor 격자 — 픽셀 좌상단 코너는 그 픽셀에 속한다.
+    pub fn world_to_raster(&self, x: f64, y: f64) -> (i64, i64) {
+        // float→int `as` 는 포화 변환 — 극단 좌표에서 +1 이 debug 빌드 패닉을
+        // 내지 않도록 saturating_add (포화 결과는 어차피 범위 밖 판정으로 귀결).
+        let col = (((x - self.origin_x) / self.pixel_x).floor() as i64).saturating_add(1);
+        let row = (((self.origin_y - y) / self.pixel_y).floor() as i64).saturating_add(1);
+        (col, row)
+    }
+
+    /// **1-based** 그리드 (col, row) → 그 픽셀 좌상단 코너의 월드 좌표.
+    pub fn raster_to_world(&self, col: i64, row: i64) -> (f64, f64) {
+        (
+            self.origin_x + (col - 1) as f64 * self.pixel_x,
+            self.origin_y - (row - 1) as f64 * self.pixel_y,
+        )
+    }
 }
 
 /// GDAL_NODATA 태그 문자열 파싱 — 공백 trim, "nan"(대소문자 무관) 지원.

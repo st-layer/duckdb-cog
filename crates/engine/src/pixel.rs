@@ -60,13 +60,16 @@ impl<S: ByteSource> CogReader<S> {
         if band == 0 || band > meta.num_bands {
             return Ok(None);
         }
-        // floor 격자: 원점 코너는 픽셀 (0,0), 우/하단 경계 좌표는 밖
-        let col = ((x - g.origin_x) / g.pixel_x).floor();
-        let row = ((g.origin_y - y) / g.pixel_y).floor();
-        if col < 0.0 || row < 0.0 || col >= l0.image_width as f64 || row >= l0.image_height as f64 {
+        // floor 격자 — 변환 준거는 Georef::world_to_raster (1-based) 하나뿐
+        let (col1, row1) = g.world_to_raster(x, y);
+        if col1 < 1
+            || row1 < 1
+            || col1 > i64::from(l0.image_width)
+            || row1 > i64::from(l0.image_height)
+        {
             return Ok(None);
         }
-        let (col, row) = (col as u64, row as u64);
+        let (col, row) = ((col1 - 1) as u64, (row1 - 1) as u64);
         let tile = ifd0
             .fetch_tile(
                 (col / l0.tile_width as u64) as usize,
