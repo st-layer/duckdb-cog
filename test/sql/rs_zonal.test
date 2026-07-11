@@ -67,3 +67,10 @@ query R
 SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', NULL, 1, 'mean');
 ----
 NULL
+
+# 범위 밖 밴드에서 count/나머지 비대칭 계약: count → 0, sum → NULL
+query IR
+SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300000.0, 3999000.0, 301000.0, 4000000.0], 9, 'count')::BIGINT,
+       RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300000.0, 3999000.0, 301000.0, 4000000.0], 9, 'sum');
+----
+0	NULL
