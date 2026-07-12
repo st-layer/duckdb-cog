@@ -38,26 +38,32 @@ ext:
     make debug
 
 # sqllogictest 실행 (test/sql/*.test) — LOAD 포함 E2E
-# COG_TEST_FIXTURES 가 픽스처 의존 테스트를, COG_TEST_HTTP 가 원격(http) 테스트를 켠다.
+# COG_TEST_FIXTURES 가 픽스처 의존 테스트를, COG_TEST_HTTP 가 원격(http) 테스트를,
+# COG_TEST_STAC_API 가 STAC API 검색 테스트(mock /search)를 켠다.
 # 픽스처를 Range 지원 서버(rangehttpserver)로 서빙 — object_store 는 Range GET 필수.
 ext-test: ext fixtures
     #!/usr/bin/env bash
     set -euo pipefail
     port=18923
+    stac_port=18924
     (cd test/data/generated && exec uv run --project ../../.. python -m RangeHTTPServer "$port") >/tmp/cog-range-server.log 2>&1 &
     srv=$!
+    (exec uv run python scripts/mock_stac_api.py "$stac_port" test/data/stac) >/tmp/cog-stac-mock.log 2>&1 &
+    stac=$!
     # uv 의 python 자식까지 정리 — 살아남은 자식이 포트를 점유하면 다음 실행이 깨진다
-    trap 'pkill -P "$srv" 2>/dev/null || true; kill "$srv" 2>/dev/null || true' EXIT
+    trap 'pkill -P "$srv" 2>/dev/null || true; kill "$srv" 2>/dev/null || true; pkill -P "$stac" 2>/dev/null || true; kill "$stac" 2>/dev/null || true' EXIT
     ready=0
     for _ in $(seq 50); do
-        curl -sf -o /dev/null "http://127.0.0.1:$port/" && ready=1 && break
+        curl -sf -o /dev/null "http://127.0.0.1:$port/" \
+            && curl -sf -o /dev/null -X POST -d '{}' "http://127.0.0.1:$stac_port/search" \
+            && ready=1 && break
         sleep 0.1
     done
     if [ "$ready" != 1 ]; then
-        echo "FAIL: range 서버가 :$port 에서 안 뜸 (포트 점유? /tmp/cog-range-server.log 확인)" >&2
+        echo "FAIL: 테스트 서버가 안 뜸 (:$port range / :$stac_port stac-mock — 포트 점유? /tmp/cog-*.log 확인)" >&2
         exit 1
     fi
-    COG_TEST_FIXTURES=test/data/generated COG_TEST_HTTP="http://127.0.0.1:$port" make test_debug
+    COG_TEST_FIXTURES=test/data/generated COG_TEST_HTTP="http://127.0.0.1:$port" COG_TEST_STAC_API="http://127.0.0.1:$stac_port/search" make test_debug
     # T1 조밀 오라클 (RS_Value ↔ rasterio, ABI 일치 duckdb-python) —
     # 빌드 산출물이 필요해 check 의 oracle 과 분리 (COG_EXT_BINARY 로 활성화)
     COG_EXT_BINARY=build/debug/cog.duckdb_extension uv run pytest tests/oracle/test_rs_value_oracle.py -x -q

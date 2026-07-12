@@ -1,0 +1,49 @@
+# name: test/sql/read_stac_search.test
+# description: read_stac_search — STAC API POST /search + rel=next 페이지네이션 (이슈 #29).
+#   서버는 scripts/mock_stac_api.py (just ext-test 가 기동): page1(2 items, POST next
+#   body+merge) → page2(1 item). collections := ['empty'] 는 빈 페이지 (인자 전달 검증).
+# group: [cog]
+
+require cog
+
+require-env COG_TEST_STAC_API
+
+# 2 페이지 팔로우: page1(2) + page2(1) = 3행, 페이지·아이템 순서 보존
+query TTT
+SELECT item_id, asset_key, href FROM read_stac_search('${COG_TEST_STAC_API}');
+----
+scene-1	B04	https://example.com/scene-1/B04.tif
+scene-2	B04	https://example.com/scene-2/B04.tif
+scene-3	B04	https://example.com/scene-3/B04.tif
+
+# max_rows 절단 — 2행에서 멈춘다 (다음 페이지 요청 없이)
+query I
+SELECT count(*) FROM read_stac_search('${COG_TEST_STAC_API}', max_rows := 2);
+----
+2
+
+# named 인자(collections)가 요청 body 로 서버까지 전달된다 (mock: ['empty'] → 빈 페이지)
+query I
+SELECT count(*) FROM read_stac_search('${COG_TEST_STAC_API}', collections := ['empty']);
+----
+0
+
+# 스키마 = read_stac 과 동일: collection/datetime/bbox graceful (scene-1 은 전부 존재)
+query TTI
+SELECT collection, datetime, (bbox IS NULL)::INT
+FROM read_stac_search('${COG_TEST_STAC_API}', max_rows := 1);
+----
+test-collection	2026-07-12T02:00:00Z	0
+
+# 결측 graceful: scene-2 는 bbox/media_type 없음 → NULL (에러 아님)
+query TII
+SELECT item_id, (bbox IS NULL)::INT, (media_type IS NULL)::INT
+FROM read_stac_search('${COG_TEST_STAC_API}') WHERE item_id = 'scene-2';
+----
+scene-2	1	1
+
+# 연결 불가 URL → 함수명 프리픽스가 있는 에러
+statement error
+SELECT * FROM read_stac_search('http://127.0.0.1:1/search');
+----
+read_stac_search
