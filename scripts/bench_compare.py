@@ -31,7 +31,6 @@ def con_rt():
 import random
 rng = random.Random(42)
 PTS = [(300000.0 + rng.uniform(1, 40959), 4000000.0 - rng.uniform(1, 40959)) for _ in range(1000)]
-XS = [p[0] for p in PTS]; YS = [p[1] for p in PTS]
 
 R = {}
 
@@ -49,7 +48,10 @@ cc.execute("CREATE OR REPLACE TABLE pts(i INT, x DOUBLE, y DOUBLE)")
 cc.executemany("INSERT INTO pts VALUES (?, ?, ?)", [(i, x, y) for i, (x, y) in enumerate(PTS)])
 cr.execute("CREATE OR REPLACE TABLE pts(i INT, x DOUBLE, y DOUBLE)")
 cr.executemany("INSERT INTO pts VALUES (?, ?, ?)", [(i, x, y) for i, (x, y) in enumerate(PTS)])
-R["W2_1kpts_cog_values"] = timed(lambda: cc.execute(f"SELECT RS_Values('{F}', ?, ?)", [XS, YS]).fetchall())
+# 주의: RS_Values 에 파이썬 리스트를 쿼리 파라미터로 넘기면 duckdb-python 의
+# 리스트 변환 비용(1k×2 기준 ~107ms)이 측정을 지배한다 (#27 에라텀). 스칼라
+# 루프와 같은 pts 테이블에서 list() 집계로 조립해야 공정 비교다.
+R["W2_1kpts_cog_values"] = timed(lambda: cc.execute(f"SELECT RS_Values('{F}', list(x), list(y)) FROM pts").fetchall())
 R["W2_1kpts_cog_scalar"] = timed(lambda: cc.execute(f"SELECT RS_Value('{F}', x, y) FROM pts").fetchall())
 def rt_pts():
     cr.execute(f"""
