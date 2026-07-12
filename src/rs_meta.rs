@@ -17,20 +17,17 @@ use duckdb::Connection;
 
 // crate:: 가 아니라 super:: — wasm 우회 빌드(example)에선 lib.rs 가 크레이트
 // 루트가 아니므로 부모 모듈 상대 참조만 양쪽에서 성립한다.
-use super::open_source;
+use super::open_cog_cached;
 
 /// 경로 하나의 IFD 메타데이터 읽기 — read_cog bind 와 동일 경로 (픽셀 미접촉).
-/// 로컬/원격 스킴 디스패치는 [`super::open_source`] 공용.
+/// 원격은 전역 캐시 경유 (#26); meta 는 작은 구조체라 clone 으로 소유권을 뗀다.
 fn read_meta(fn_name: &str, path: &str) -> Result<engine::CogMeta, Box<dyn Error>> {
-    let source = open_source(path).map_err(|e| format!("{fn_name}: {e}"))?;
-    Ok(
-        engine::futures::executor::block_on(engine::read_cog_meta(source))
-            .map_err(|e| format!("{fn_name}: '{path}': {e}"))?,
-    )
+    let cog = open_cog_cached(path).map_err(|e| format!("{fn_name}: {e}"))?;
+    Ok(cog.0.clone())
 }
 
 /// 컬럼 0(VARCHAR path)을 행별 CogMeta 로 변환. NULL 경로 → None.
-/// 청크 내 같은 경로는 한 번만 읽는다 (전역 캐시는 두지 않음 — Phase 1 단순성).
+/// 청크 내 같은 경로는 한 번만 읽는다 (원격은 전역 캐시도 경유 — #26).
 fn meta_per_row(
     fn_name: &str,
     input: &mut DataChunkHandle,
@@ -331,8 +328,8 @@ impl VScalar for RsValue {
         };
 
         // 청크 내 경로 dedupe — 파일당 open(메타 IFD 읽기) 1회, 픽셀은 행마다.
-        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
-        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
+        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
         let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
         for i in 0..n {
             let band = bands[i].and_then(|b| u32::try_from(b).ok());
@@ -346,14 +343,10 @@ impl VScalar for RsValue {
             }
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
             let opened = match cache.get(&path) {
-                Some(o) => Rc::clone(o),
+                Some(o) => std::sync::Arc::clone(o),
                 None => {
-                    let source =
-                        open_source(&path).map_err(|e| format!("RS_Value: {e}"))?;
-                    let o = engine::futures::executor::block_on(engine::open_cog(source))
-                        .map_err(|e| format!("RS_Value: '{path}': {e}"))?;
-                    let o = Rc::new(o);
-                    cache.insert(path.clone(), Rc::clone(&o));
+                    let o = open_cog_cached(&path).map_err(|e| format!("RS_Value: {e}"))?;
+                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
                     o
                 }
             };
@@ -411,8 +404,8 @@ impl VScalar for RsNormalizedDifference {
         let b2v = input.flat_vector(4);
         let b2s = unsafe { b2v.as_slice_with_len::<i32>(n) };
 
-        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
-        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
+        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
         let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
         for i in 0..n {
             if paths.row_is_null(i as u64)
@@ -426,14 +419,10 @@ impl VScalar for RsNormalizedDifference {
             }
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
             let opened = match cache.get(&path) {
-                Some(o) => Rc::clone(o),
+                Some(o) => std::sync::Arc::clone(o),
                 None => {
-                    let source =
-                        open_source(&path).map_err(|e| format!("RS_NormalizedDifference: {e}"))?;
-                    let o = engine::futures::executor::block_on(engine::open_cog(source))
-                        .map_err(|e| format!("RS_NormalizedDifference: '{path}': {e}"))?;
-                    let o = Rc::new(o);
-                    cache.insert(path.clone(), Rc::clone(&o));
+                    let o = open_cog_cached(&path).map_err(|e| format!("RS_NormalizedDifference: {e}"))?;
+                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
                     o
                 }
             };
@@ -514,8 +503,8 @@ impl VScalar for RsValues {
         let xs = unsafe { xchild.as_slice_with_len::<f64>(xe) };
         let ys = unsafe { ychild.as_slice_with_len::<f64>(ye) };
 
-        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
-        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
+        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
         // 행별 결과: None = 리스트 자체 NULL, Some(vec) = 원소별 값
         let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(n);
         for i in 0..n {
@@ -538,13 +527,10 @@ impl VScalar for RsValues {
             }
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
             let opened = match cache.get(&path) {
-                Some(o) => Rc::clone(o),
+                Some(o) => std::sync::Arc::clone(o),
                 None => {
-                    let source = open_source(&path).map_err(|e| format!("RS_Values: {e}"))?;
-                    let o = engine::futures::executor::block_on(engine::open_cog(source))
-                        .map_err(|e| format!("RS_Values: '{path}': {e}"))?;
-                    let o = Rc::new(o);
-                    cache.insert(path.clone(), Rc::clone(&o));
+                    let o = open_cog_cached(&path).map_err(|e| format!("RS_Values: {e}"))?;
+                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
                     o
                 }
             };
@@ -676,8 +662,8 @@ impl VScalar for RsBandAsArray {
             None => &[],
         };
 
-        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
-        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
+        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
         let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(n);
         for i in 0..n {
             if paths.row_is_null(i as u64) || bandv.row_is_null(i as u64) {
@@ -707,14 +693,10 @@ impl VScalar for RsBandAsArray {
             };
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
             let opened = match cache.get(&path) {
-                Some(o) => Rc::clone(o),
+                Some(o) => std::sync::Arc::clone(o),
                 None => {
-                    let source =
-                        open_source(&path).map_err(|e| format!("RS_BandAsArray: {e}"))?;
-                    let o = engine::futures::executor::block_on(engine::open_cog(source))
-                        .map_err(|e| format!("RS_BandAsArray: '{path}': {e}"))?;
-                    let o = Rc::new(o);
-                    cache.insert(path.clone(), Rc::clone(&o));
+                    let o = open_cog_cached(&path).map_err(|e| format!("RS_BandAsArray: {e}"))?;
+                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
                     o
                 }
             };
@@ -899,8 +881,8 @@ impl VScalar for RsZonalStats {
         let statv = input.flat_vector(3);
         let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
 
-        type Opened = (engine::CogMeta, engine::CogReader<Box<dyn engine::ByteSource>>);
-        let mut cache: HashMap<String, Rc<Opened>> = HashMap::new();
+        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
+        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
         let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
         for i in 0..n {
             if paths.row_is_null(i as u64)
@@ -934,13 +916,10 @@ impl VScalar for RsZonalStats {
             let bbox = [bvals[bo], bvals[bo + 1], bvals[bo + 2], bvals[bo + 3]];
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
             let opened = match cache.get(&path) {
-                Some(o) => Rc::clone(o),
+                Some(o) => std::sync::Arc::clone(o),
                 None => {
-                    let source = open_source(&path).map_err(|e| format!("RS_ZonalStats: {e}"))?;
-                    let o = engine::futures::executor::block_on(engine::open_cog(source))
-                        .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
-                    let o = Rc::new(o);
-                    cache.insert(path.clone(), Rc::clone(&o));
+                    let o = open_cog_cached(&path).map_err(|e| format!("RS_ZonalStats: {e}"))?;
+                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
                     o
                 }
             };

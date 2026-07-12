@@ -225,6 +225,44 @@ fn open_source(path: &str) -> std::result::Result<Box<dyn engine::ByteSource>, S
     }
 }
 
+/// 프로세스 수명 원격 리더 캐시 (이슈 #26). TTL 은 `COG_REMOTE_CACHE_TTL_S`
+/// (기본 60, "0"=비활성) — TTL 내 서버측 변경은 안 보인다 (README staleness 계약).
+#[cfg(not(target_os = "emscripten"))]
+fn remote_cache() -> &'static engine::ReaderCache {
+    static CACHE: std::sync::OnceLock<engine::ReaderCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let ttl = std::env::var("COG_REMOTE_CACHE_TTL_S")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        engine::ReaderCache::new(std::time::Duration::from_secs(ttl), 8)
+    })
+}
+
+/// COG 를 열어 (meta, reader) 를 얻는다 — 원격(스킴 포함)은 전역 캐시 경유,
+/// 로컬은 매번 open (동작·FD 수명 불변, #26 수용 기준). cog_io_bench 는
+/// 콜드 측정 도구라 이 경로를 쓰지 않는다.
+#[cfg(not(target_os = "emscripten"))]
+fn open_cog_cached(path: &str) -> std::result::Result<std::sync::Arc<engine::SharedCog>, String> {
+    use engine::futures::executor::block_on;
+    if path.contains("://") {
+        let p = path.to_string();
+        block_on(remote_cache().get_or_open(path, move || {
+            Box::pin(async move {
+                let source = open_source(&p)?;
+                engine::open_cog(source)
+                    .await
+                    .map_err(|e| format!("'{p}': {e}"))
+            })
+        }))
+    } else {
+        let source = open_source(path)?;
+        block_on(engine::open_cog(source))
+            .map(std::sync::Arc::new)
+            .map_err(|e| format!("'{path}': {e}"))
+    }
+}
+
 #[cfg(not(target_os = "emscripten"))]
 #[repr(C)]
 struct ReadCogBindData {
@@ -294,13 +332,13 @@ impl VTab for ReadCogVTab {
                 Some([f[0], f[1], f[2], f[3]])
             }
         };
-        let source = open_source(&path).map_err(|e| format!("read_cog: {e}"))?;
-        // 원격 IO 는 소스 내부에서 tokio 런타임에 스폰되므로, 여기 block_on 은
+        // 원격은 전역 캐시 경유 (#26) — 반복 bind 의 콜드 메타 왕복을 제거.
+        // 원격 IO 는 소스 내부에서 tokio 런타임에 스폰되므로, 내부 block_on 은
         // JoinHandle(로컬은 즉시 완료 future)만 폴링한다 — 전용 executor 불필요.
-        let meta = engine::futures::executor::block_on(engine::read_cog_meta(source))
-            .map_err(|e| format!("read_cog: '{path}': {e}"))?;
+        let cog = open_cog_cached(&path).map_err(|e| format!("read_cog: {e}"))?;
+        let meta = &cog.0;
         Ok(ReadCogBindData {
-            tiles: engine::enumerate_tiles_filtered(&meta, filter)
+            tiles: engine::enumerate_tiles_filtered(meta, filter)
                 .map_err(|e| format!("read_cog: '{path}': {e}"))?,
             crs: meta.crs().map(std::ffi::CString::new).transpose()?,
         })

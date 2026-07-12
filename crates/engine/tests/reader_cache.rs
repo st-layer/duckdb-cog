@@ -58,13 +58,19 @@ fn second_open_same_key_touches_nothing() {
     let opener = counting_opener(raw, Arc::clone(&opens), Arc::clone(&fetches));
 
     let a = engine::futures::executor::block_on(cache.get_or_open("k", &opener)).expect("open");
-    let after_first = (opens.load(Ordering::Relaxed), fetches.load(Ordering::Relaxed));
+    let after_first = (
+        opens.load(Ordering::Relaxed),
+        fetches.load(Ordering::Relaxed),
+    );
     assert_eq!(after_first.0, 1, "첫 조회는 실제 open");
     assert!(after_first.1 >= 1, "첫 open 은 소스를 읽는다");
 
     let b = engine::futures::executor::block_on(cache.get_or_open("k", &opener)).expect("hit");
     assert_eq!(
-        (opens.load(Ordering::Relaxed), fetches.load(Ordering::Relaxed)),
+        (
+            opens.load(Ordering::Relaxed),
+            fetches.load(Ordering::Relaxed)
+        ),
         after_first,
         "두 번째 조회는 open 도 fetch 도 없어야 한다 (T5 계약)"
     );

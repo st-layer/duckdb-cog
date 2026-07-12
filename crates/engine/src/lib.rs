@@ -7,6 +7,8 @@
 //! wasm32-unknown-unknown 컴파일 가능 유지(G8).
 
 #[cfg(feature = "reader")]
+mod cache;
+#[cfg(feature = "reader")]
 mod meta;
 #[cfg(feature = "reader")]
 mod pixel;
@@ -15,6 +17,8 @@ mod source;
 #[cfg(feature = "reader")]
 mod stac;
 
+#[cfg(feature = "reader")]
+pub use cache::{ReaderCache, SharedCog};
 #[cfg(feature = "reader")]
 pub use meta::{
     enumerate_tiles, enumerate_tiles_filtered, read_cog_meta, BandStats, CogMeta, Georef,
