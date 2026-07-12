@@ -141,7 +141,10 @@ fn page_with_post_next_link() {
     assert_eq!(next.method, "POST");
     assert!(next.merge);
     assert_eq!(
-        next.body.as_ref().and_then(|b| b.get("token")).and_then(|v| v.as_str()),
+        next.body
+            .as_ref()
+            .and_then(|b| b.get("token"))
+            .and_then(|v| v.as_str()),
         Some("next:abc")
     );
 }
@@ -153,7 +156,10 @@ fn page_with_get_next_link_defaults() {
         r#"{{"type": "FeatureCollection", "features": [{ITEM}],
             "links": [{{"rel": "next", "href": "https://api/search?page=2"}}]}}"#
     );
-    let next = parse_stac_page(doc.as_bytes()).expect("valid").next.expect("next");
+    let next = parse_stac_page(doc.as_bytes())
+        .expect("valid")
+        .next
+        .expect("next");
     assert_eq!(next.method, "GET");
     assert_eq!(next.body, None);
     assert!(!next.merge);
@@ -166,9 +172,15 @@ fn page_without_next() {
         r#"{{"type": "FeatureCollection", "features": [{ITEM}],
             "links": [{{"rel": "self", "href": "https://api/search"}}]}}"#
     );
-    assert!(parse_stac_page(with_links.as_bytes()).expect("valid").next.is_none());
+    assert!(parse_stac_page(with_links.as_bytes())
+        .expect("valid")
+        .next
+        .is_none());
     let no_links = format!(r#"{{"type": "FeatureCollection", "features": [{ITEM}]}}"#);
-    assert!(parse_stac_page(no_links.as_bytes()).expect("valid").next.is_none());
+    assert!(parse_stac_page(no_links.as_bytes())
+        .expect("valid")
+        .next
+        .is_none());
 }
 
 /// 단일 Feature 는 페이지가 아니다 — 에러 (read_stac 과 달리 검색 응답 계약).
@@ -213,15 +225,24 @@ fn apply_next_merge_semantics() {
         merge: true,
     };
     let (href, method, body) = apply_next(&original, &next);
-    assert_eq!((href.as_str(), method.as_str()), ("https://api/search", "POST"));
+    assert_eq!(
+        (href.as_str(), method.as_str()),
+        ("https://api/search", "POST")
+    );
     assert_eq!(
         body.expect("merged body"),
         engine::serde_json::json!({"collections": ["c"], "limit": 20, "token": "t2"})
     );
 
-    let replace = engine::StacNext { merge: false, ..next };
+    let replace = engine::StacNext {
+        merge: false,
+        ..next
+    };
     let (_, _, body) = apply_next(&original, &replace);
-    assert_eq!(body.expect("replaced"), engine::serde_json::json!({"token": "t2", "limit": 20}));
+    assert_eq!(
+        body.expect("replaced"),
+        engine::serde_json::json!({"token": "t2", "limit": 20})
+    );
 
     let get = engine::StacNext {
         href: "https://api/search?page=2".into(),
