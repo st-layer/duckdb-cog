@@ -87,3 +87,33 @@ fn three_dimensional_bbox_drops_z() {
     .expect("valid");
     assert_eq!(rows[0].bbox, None);
 }
+
+/// raster:bands 통계 매핑 (§6.7 "decode 없는 집계" 재료).
+#[test]
+fn parses_raster_bands_statistics() {
+    let doc = std::fs::read("../../test/data/stac/with_stats.json").expect("fixture");
+    let rows = parse_stac(&doc).expect("valid STAC");
+    let get = |k: &str| rows.iter().find(|r| r.asset_key == k).expect(k);
+
+    let red = get("red");
+    let bands = red.band_stats.as_ref().expect("raster:bands 있음");
+    assert_eq!(bands.len(), 1);
+    assert_eq!(
+        (bands[0].min, bands[0].max, bands[0].mean, bands[0].stddev),
+        (Some(1.0), Some(65535.0), Some(32768.5), Some(18918.9))
+    );
+
+    let rgb = get("rgb");
+    let bands = rgb.band_stats.as_ref().expect("raster:bands 있음");
+    assert_eq!(bands.len(), 3);
+    assert_eq!(bands[0].stddev, None, "부분 결측 graceful");
+    assert_eq!(bands[1].stddev, Some(73.2));
+    assert_eq!(
+        (bands[2].min, bands[2].mean),
+        (None, None),
+        "빈 밴드 객체도 자리 보존"
+    );
+
+    // 확장 부재 → None (빈 리스트와 구분)
+    assert!(get("nostats").band_stats.is_none());
+}
