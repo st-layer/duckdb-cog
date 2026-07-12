@@ -29,7 +29,13 @@ pub use pixel::{apply_nodata, normalized_difference, open_cog, CogReader, ZonalS
 #[cfg(feature = "reader")]
 pub use source::{fetch_all, ByteSource, MemorySource, SourceError};
 #[cfg(feature = "reader")]
-pub use stac::{parse_stac, StacAssetRow, StacError};
+pub use stac::{
+    apply_next, build_search_body, parse_stac, parse_stac_page, StacAssetRow, StacError, StacNext,
+    StacPage,
+};
+// STAC 검색 body 조립/전달용 (ext 가 별도 의존 없이) — bytes/futures 와 같은 이유.
+#[cfg(feature = "reader")]
+pub use serde_json;
 // ByteSource 구현자가 시그니처 타입(Bytes, BoxFuture)과 block_on 을 별도 의존성
 // 없이 쓰도록 재수출.
 #[cfg(feature = "reader")]
