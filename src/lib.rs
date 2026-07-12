@@ -25,6 +25,12 @@ mod rs_meta {
     include!("rs_meta.rs");
 }
 
+/// §6.5(b) I/O 경로 실측 하네스 (이슈 #30, experimental — 결정 후 제거 예정).
+#[cfg(not(target_os = "emscripten"))]
+mod io_bench {
+    include!("io_bench.rs");
+}
+
 #[repr(C)]
 struct VersionBindData;
 
@@ -585,6 +591,7 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
         con.register_table_function::<ReadCogVTab>("read_cog")?;
         con.register_table_function::<ReadStacVTab>("read_stac")?;
         rs_meta::register(&con)?;
+        io_bench::register(&con)?;
     }
     Ok(())
 }
