@@ -25,3 +25,9 @@ serde_json = { version = "1", optional = true }
 [dev-dependencies]
 # T4 property-based 불변식 (RFC §6.9) — dev 전용, wasm 판정(cargo check)과 무관
 proptest = "1"
+# T7 벤치마크 회귀 (RFC §6.9)
+criterion = "0.5"
+
+[[bench]]
+name = "read_bench"
+harness = false

@@ -77,6 +77,14 @@ wasm-check:
 fixtures:
     uv run python scripts/gen_fixtures.py
 
+# T7 벤치마크 (criterion) — 로컬 성능 관측. CI 회귀 게이트는 후속.
+bench: fixtures
+    cargo bench -p engine
+
+# 벤치 스모크: "벤치가 실행 가능하다" 판정 (측정 1회 축소 실행)
+bench-smoke: fixtures
+    cargo bench -p engine -- --test
+
 # rasterio 오라클 대조 테스트 (T1) — 픽스처 없으면 자동 생성
 oracle: fixtures
     uv run pytest tests/oracle -x -q
