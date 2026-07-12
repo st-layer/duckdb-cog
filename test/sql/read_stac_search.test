@@ -42,6 +42,13 @@ FROM read_stac_search('${COG_TEST_STAC_API}') WHERE item_id = 'scene-2';
 ----
 scene-2	1	1
 
+# page_size(서버 limit 힌트 — SQL 예약어 회피 이름)가 파싱·전달된다.
+# mock 은 페이지 크기를 무시하므로 페이지네이션 결과는 그대로 3행.
+query I
+SELECT count(*) FROM read_stac_search('${COG_TEST_STAC_API}', page_size := 1);
+----
+3
+
 # 연결 불가 URL → 함수명 프리픽스가 있는 에러
 statement error
 SELECT * FROM read_stac_search('http://127.0.0.1:1/search');

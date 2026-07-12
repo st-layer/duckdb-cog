@@ -64,11 +64,12 @@ pub struct StacSearchInitData {
 }
 
 /// `SELECT * FROM read_stac_search(url, collections := [...], bbox := [...],
-/// datetime := '...', limit := N, max_rows := N);` — 스키마는 read_stac 과 동일.
+/// datetime := '...', page_size := N, max_rows := N);` — 스키마는 read_stac 과 동일.
 ///
 /// `url` 은 search 엔드포인트 전체 (예: https://earth-search.aws.element84.com/v1/search).
-/// `limit` 은 서버 페이지 크기 힌트, `max_rows`(기본 1,000) 는 클라이언트 행 상한 —
-/// 도달 시 다음 페이지를 요청하지 않고 초과분을 자른다.
+/// `page_size` 는 서버 페이지 크기 힌트(STAC body 의 `limit` — SQL 예약어라 이름을
+/// 바꿔 노출), `max_rows`(기본 1,000) 는 클라이언트 행 상한 — 도달 시 다음
+/// 페이지를 요청하지 않고 초과분을 자른다.
 pub struct ReadStacSearchVTab;
 
 impl VTab for ReadStacSearchVTab {
@@ -107,10 +108,10 @@ impl VTab for ReadStacSearchVTab {
             }
         };
         let datetime = named("datetime").map(|v| v.to_string());
-        let limit = named("limit")
+        let page_size = named("page_size")
             .map(|v| u32::try_from(v.to_int64()))
             .transpose()
-            .map_err(|_| "read_stac_search: limit must be a positive integer")?;
+            .map_err(|_| "read_stac_search: page_size must be a positive integer")?;
         let max_rows = match named("max_rows") {
             None => 1000usize,
             Some(v) => usize::try_from(v.to_int64())
@@ -123,7 +124,7 @@ impl VTab for ReadStacSearchVTab {
             collections.as_deref(),
             bbox,
             datetime.as_deref(),
-            limit,
+            page_size,
         );
         let mut rows: Vec<engine::StacAssetRow> = Vec::new();
         let mut href = url;
@@ -195,7 +196,7 @@ impl VTab for ReadStacSearchVTab {
                 LogicalTypeHandle::from(LogicalTypeId::Varchar),
             ),
             (
-                "limit".to_string(),
+                "page_size".to_string(),
                 LogicalTypeHandle::from(LogicalTypeId::Integer),
             ),
             (
