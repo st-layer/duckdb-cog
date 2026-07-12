@@ -1,0 +1,37 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "scene-1",
+      "collection": "test-collection",
+      "bbox": [126.0, 37.0, 127.0, 38.0],
+      "properties": { "datetime": "2026-07-12T02:00:00Z" },
+      "assets": {
+        "B04": {
+          "href": "https://example.com/scene-1/B04.tif",
+          "type": "image/tiff; application=geotiff; profile=cloud-optimized"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "scene-2",
+      "collection": "test-collection",
+      "properties": { "datetime": "2026-07-11T02:00:00Z" },
+      "assets": {
+        "B04": { "href": "https://example.com/scene-2/B04.tif" }
+      }
+    }
+  ],
+  "links": [
+    { "rel": "self", "href": "{BASE}/search" },
+    {
+      "rel": "next",
+      "href": "{BASE}/search",
+      "method": "POST",
+      "merge": true,
+      "body": { "token": "page:2" }
+    }
+  ]
+}

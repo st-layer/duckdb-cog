@@ -117,3 +117,140 @@ fn parses_raster_bands_statistics() {
     // 확장 부재 → None (빈 리스트와 구분)
     assert!(get("nostats").band_stats.is_none());
 }
+
+// ---- STAC API 검색 재료 (#29): 페이지 파싱 + 검색 body 조립 + next 팔로우 ----
+
+use engine::{apply_next, build_search_body, parse_stac_page};
+
+/// FeatureCollection + rel=next(POST, body, merge) → rows 와 next 를 함께 푼다.
+#[test]
+fn page_with_post_next_link() {
+    let doc = format!(
+        r#"{{"type": "FeatureCollection", "features": [{ITEM}],
+            "links": [
+              {{"rel": "self", "href": "https://api/search"}},
+              {{"rel": "next", "href": "https://api/search",
+                "method": "POST", "merge": true,
+                "body": {{"token": "next:abc"}}}}
+            ]}}"#
+    );
+    let page = parse_stac_page(doc.as_bytes()).expect("valid page");
+    assert_eq!(page.rows.len(), 1);
+    let next = page.next.expect("next link");
+    assert_eq!(next.href, "https://api/search");
+    assert_eq!(next.method, "POST");
+    assert!(next.merge);
+    assert_eq!(
+        next.body
+            .as_ref()
+            .and_then(|b| b.get("token"))
+            .and_then(|v| v.as_str()),
+        Some("next:abc")
+    );
+}
+
+/// method 생략 시 GET 이 기본 (STAC API 링크 규약), body/merge 없음.
+#[test]
+fn page_with_get_next_link_defaults() {
+    let doc = format!(
+        r#"{{"type": "FeatureCollection", "features": [{ITEM}],
+            "links": [{{"rel": "next", "href": "https://api/search?page=2"}}]}}"#
+    );
+    let next = parse_stac_page(doc.as_bytes())
+        .expect("valid")
+        .next
+        .expect("next");
+    assert_eq!(next.method, "GET");
+    assert_eq!(next.body, None);
+    assert!(!next.merge);
+}
+
+/// next 없는 마지막 페이지·links 자체가 없는 페이지 → next = None.
+#[test]
+fn page_without_next() {
+    let with_links = format!(
+        r#"{{"type": "FeatureCollection", "features": [{ITEM}],
+            "links": [{{"rel": "self", "href": "https://api/search"}}]}}"#
+    );
+    assert!(parse_stac_page(with_links.as_bytes())
+        .expect("valid")
+        .next
+        .is_none());
+    let no_links = format!(r#"{{"type": "FeatureCollection", "features": [{ITEM}]}}"#);
+    assert!(parse_stac_page(no_links.as_bytes())
+        .expect("valid")
+        .next
+        .is_none());
+}
+
+/// 단일 Feature 는 페이지가 아니다 — 에러 (read_stac 과 달리 검색 응답 계약).
+#[test]
+fn page_rejects_bare_item() {
+    assert!(parse_stac_page(ITEM.as_bytes()).is_err());
+}
+
+/// 설정된 필드만 body 에 들어간다 — None 필드는 키 자체가 없어야 한다.
+#[test]
+fn search_body_includes_only_set_fields() {
+    let body = build_search_body(None, None, None, None);
+    assert_eq!(body, engine::serde_json::json!({}));
+
+    let cols = vec!["sentinel-2-l2a".to_string()];
+    let body = build_search_body(
+        Some(&cols),
+        Some([126.0, 37.0, 127.0, 38.0]),
+        Some("2026-07-01/2026-07-12"),
+        Some(50),
+    );
+    assert_eq!(
+        body,
+        engine::serde_json::json!({
+            "collections": ["sentinel-2-l2a"],
+            "bbox": [126.0, 37.0, 127.0, 38.0],
+            "datetime": "2026-07-01/2026-07-12",
+            "limit": 50
+        })
+    );
+}
+
+/// merge=true: 원 body 위에 next body 를 얹는다 (겹치는 키는 next 가 이긴다).
+/// merge=false: next body 만 쓴다. body 없는 GET next: body = None.
+#[test]
+fn apply_next_merge_semantics() {
+    let original = engine::serde_json::json!({"collections": ["c"], "limit": 10});
+    let next = engine::StacNext {
+        href: "https://api/search".into(),
+        method: "POST".into(),
+        body: Some(engine::serde_json::json!({"token": "t2", "limit": 20})),
+        merge: true,
+    };
+    let (href, method, body) = apply_next(&original, &next);
+    assert_eq!(
+        (href.as_str(), method.as_str()),
+        ("https://api/search", "POST")
+    );
+    assert_eq!(
+        body.expect("merged body"),
+        engine::serde_json::json!({"collections": ["c"], "limit": 20, "token": "t2"})
+    );
+
+    let replace = engine::StacNext {
+        merge: false,
+        ..next
+    };
+    let (_, _, body) = apply_next(&original, &replace);
+    assert_eq!(
+        body.expect("replaced"),
+        engine::serde_json::json!({"token": "t2", "limit": 20})
+    );
+
+    let get = engine::StacNext {
+        href: "https://api/search?page=2".into(),
+        method: "GET".into(),
+        body: None,
+        merge: false,
+    };
+    let (_, method, body) = apply_next(&original, &get);
+    assert_eq!(method, "GET");
+    assert_eq!(body, None);
+}

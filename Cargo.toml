@@ -32,6 +32,9 @@ object_store = { version = "0.13", features = ["http", "aws"] }
 url = "2"
 # object_store(reqwest) future 는 tokio reactor 가 필요 — 익스텐션 수명에 묶인 런타임 1개.
 tokio = { version = "1", features = ["rt-multi-thread"] }
+# STAC API 검색(POST /search)용 JSON HTTP 클라이언트 (RFC §6.7, 이슈 #29) —
+# object_store 가 이미 끄는 reqwest/rustls 계열과 버전·TLS 스택을 공유한다.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 engine = { path = "crates/engine", default-features = false }

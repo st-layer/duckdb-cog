@@ -31,6 +31,12 @@ mod io_bench {
     include!("io_bench.rs");
 }
 
+/// STAC API 검색 (POST /search + 페이지네이션, 이슈 #29).
+#[cfg(not(target_os = "emscripten"))]
+mod stac_search {
+    include!("stac_search.rs");
+}
+
 #[repr(C)]
 struct VersionBindData;
 
@@ -460,36 +466,7 @@ impl VTab for ReadStacVTab {
     type BindData = ReadStacBindData;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        for col in [
-            "item_id",
-            "collection",
-            "datetime",
-            "asset_key",
-            "href",
-            "media_type",
-        ] {
-            bind.add_result_column(col, LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        }
-        let double = || LogicalTypeHandle::from(LogicalTypeId::Double);
-        bind.add_result_column(
-            "bbox",
-            LogicalTypeHandle::struct_type(&[
-                ("xmin", double()),
-                ("ymin", double()),
-                ("xmax", double()),
-                ("ymax", double()),
-            ]),
-        );
-        // raster:bands 통계 (§6.7) — 확장 부재 시 NULL
-        bind.add_result_column(
-            "band_stats",
-            LogicalTypeHandle::list(&LogicalTypeHandle::struct_type(&[
-                ("min", double()),
-                ("max", double()),
-                ("mean", double()),
-                ("stddev", double()),
-            ])),
-        );
+        add_stac_columns(bind);
         let url = bind.get_parameter(0).to_string();
         let source = open_source(&url).map_err(|e| format!("read_stac: {e}"))?;
         let bytes = engine::futures::executor::block_on(engine::fetch_all(&source))
@@ -518,7 +495,54 @@ impl VTab for ReadStacVTab {
             output.set_len(0);
             return Ok(());
         }
-        let batch = &rows[start..(start + CHUNK).min(rows.len())];
+        write_stac_batch(&rows[start..(start + CHUNK).min(rows.len())], output);
+        Ok(())
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        Some(vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)])
+    }
+}
+
+/// read_stac 계열 공통 스키마 8컬럼 — [`write_stac_batch`] 와 짝 (같이 바꿀 것).
+#[cfg(not(target_os = "emscripten"))]
+fn add_stac_columns(bind: &BindInfo) {
+    for col in [
+        "item_id",
+        "collection",
+        "datetime",
+        "asset_key",
+        "href",
+        "media_type",
+    ] {
+        bind.add_result_column(col, LogicalTypeHandle::from(LogicalTypeId::Varchar));
+    }
+    let double = || LogicalTypeHandle::from(LogicalTypeId::Double);
+    bind.add_result_column(
+        "bbox",
+        LogicalTypeHandle::struct_type(&[
+            ("xmin", double()),
+            ("ymin", double()),
+            ("xmax", double()),
+            ("ymax", double()),
+        ]),
+    );
+    // raster:bands 통계 (§6.7) — 확장 부재 시 NULL
+    bind.add_result_column(
+        "band_stats",
+        LogicalTypeHandle::list(&LogicalTypeHandle::struct_type(&[
+            ("min", double()),
+            ("max", double()),
+            ("mean", double()),
+            ("stddev", double()),
+        ])),
+    );
+}
+
+/// (item, asset) 행 배치를 공통 스키마로 쓴다 — read_stac · read_stac_search 공용.
+#[cfg(not(target_os = "emscripten"))]
+fn write_stac_batch(batch: &[engine::StacAssetRow], output: &mut DataChunkHandle) {
+    {
         // VARCHAR 6컬럼: 값 insert / 결측 set_null
         for (col, get) in [
             (
@@ -613,11 +637,6 @@ impl VTab for ReadStacVTab {
             lv.set_len(total);
         }
         output.set_len(batch.len());
-        Ok(())
-    }
-
-    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
-        Some(vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)])
     }
 }
 
@@ -630,6 +649,7 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
         con.register_table_function::<ReadStacVTab>("read_stac")?;
         rs_meta::register(&con)?;
         io_bench::register(&con)?;
+        stac_search::register(&con)?;
     }
     Ok(())
 }
