@@ -5,14 +5,7 @@
 
 use serde_json::Value;
 
-/// raster:bands 확장의 밴드별 통계 — 필드 단위 부분 결측 허용 (graceful).
-#[derive(Debug, Clone, PartialEq)]
-pub struct BandStats {
-    pub min: Option<f64>,
-    pub max: Option<f64>,
-    pub mean: Option<f64>,
-    pub stddev: Option<f64>,
-}
+use crate::meta::BandStats;
 
 /// read_stac() 한 행 — (item, asset) 조합.
 #[derive(Debug, Clone, PartialEq)]

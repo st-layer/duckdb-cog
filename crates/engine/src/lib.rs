@@ -17,15 +17,15 @@ mod stac;
 
 #[cfg(feature = "reader")]
 pub use meta::{
-    enumerate_tiles, enumerate_tiles_filtered, read_cog_meta, CogMeta, Georef, LevelMeta,
-    MetaError, TileRow,
+    enumerate_tiles, enumerate_tiles_filtered, read_cog_meta, BandStats, CogMeta, Georef,
+    LevelMeta, MetaError, TileRow,
 };
 #[cfg(feature = "reader")]
 pub use pixel::{apply_nodata, normalized_difference, open_cog, CogReader, ZonalStats};
 #[cfg(feature = "reader")]
 pub use source::{fetch_all, ByteSource, MemorySource, SourceError};
 #[cfg(feature = "reader")]
-pub use stac::{parse_stac, BandStats, StacAssetRow, StacError};
+pub use stac::{parse_stac, StacAssetRow, StacError};
 // ByteSource 구현자가 시그니처 타입(Bytes, BoxFuture)과 block_on 을 별도 의존성
 // 없이 쓰도록 재수출.
 #[cfg(feature = "reader")]

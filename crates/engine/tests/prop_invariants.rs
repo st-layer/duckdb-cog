@@ -33,6 +33,7 @@ fn meta(w: u32, h: u32, tw: u32, th: u32, georef: Option<Georef>) -> CogMeta {
         georef,
         num_bands: 1,
         nodata: None,
+        band_stats: None,
     }
 }
 

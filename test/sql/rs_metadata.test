@@ -84,3 +84,21 @@ query IIII
 SELECT RS_Width(f), RS_Height(f), RS_NumBands(f), RS_SRID(f) FROM (SELECT '${COG_TEST_FIXTURES}/tiny_16x16_u8.tif' AS f);
 ----
 16	16	1	32652
+
+# ---- RS_BandStats: GDAL_METADATA 통계 (§6.7 decode 없는 집계) ----
+query T
+SELECT typeof(RS_BandStats('${COG_TEST_FIXTURES}/stats_64x64_u16.tif'));
+----
+STRUCT(min DOUBLE, max DOUBLE, mean DOUBLE, stddev DOUBLE)
+
+query RRRR
+SELECT s.min, s.max, s.mean, s.stddev FROM (SELECT RS_BandStats('${COG_TEST_FIXTURES}/stats_64x64_u16.tif', 1) AS s);
+----
+33.0	65477.0	32939.121338	18924.488017
+
+# 태그 없는 파일·범위 밖 밴드 → NULL (graceful)
+query TT
+SELECT (RS_BandStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif') IS NULL)::VARCHAR,
+       (RS_BandStats('${COG_TEST_FIXTURES}/stats_64x64_u16.tif', 9) IS NULL)::VARCHAR;
+----
+true	true

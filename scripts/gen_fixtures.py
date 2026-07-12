@@ -33,6 +33,7 @@ def gen_cog(
     blocksize: int = 256,
     compress: str = "NONE",
     plant_nodata_at: tuple[int, int] | None = None,
+    plant_stats: bool = False,
 ) -> None:
     """COG 생성: 타일(기본 256px), 자동 오버뷰, EPSG:32652, 10m, seed 고정.
 
@@ -69,6 +70,19 @@ def gen_cog(
         overview_resampling="nearest",
     ) as dst:
         dst.write(data)
+        if plant_stats:
+            # GDAL_METADATA 의 STATISTICS_* 밴드 태그 (§6.7 decode 없는 집계 재료).
+            # nodata 제외 실측값을 고정 포맷으로 — 결정성은 lock 이 감시.
+            for b in range(1, count + 1):
+                band = data[b - 1].astype("float64")
+                valid = band[band != nodata] if nodata is not None else band
+                dst.update_tags(
+                    b,
+                    STATISTICS_MINIMUM=f"{valid.min():.6f}",
+                    STATISTICS_MAXIMUM=f"{valid.max():.6f}",
+                    STATISTICS_MEAN=f"{valid.mean():.6f}",
+                    STATISTICS_STDDEV=f"{valid.std():.6f}",
+                )
 
 
 FIXTURES = {
@@ -94,6 +108,10 @@ FIXTURES = {
     # (0,0) 에 nodata=0 을 실제로 심음 — RS_Value NULL E2E 의 유일한 재료
     "nodatahole_64x64_u16.tif": lambda p: gen_cog(
         p, 64, 64, 900000.0, 4000000.0, blocksize=128, plant_nodata_at=(0, 0)
+    ),
+    # GDAL_METADATA STATISTICS_* 태그 재료 (§6.7) — RS_BandStats 판정
+    "stats_64x64_u16.tif": lambda p: gen_cog(
+        p, 64, 64, 950000.0, 4000000.0, blocksize=128, plant_stats=True
     ),
 }
 

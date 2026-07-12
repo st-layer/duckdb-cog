@@ -35,6 +35,16 @@ pub struct Georef {
     pub pixel_y: f64,
 }
 
+/// 밴드별 통계 — STAC raster:bands 와 COG GDAL_METADATA 가 공유하는 모델 (§6.7).
+/// 필드 단위 부분 결측 허용 (graceful degradation).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BandStats {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub mean: Option<f64>,
+    pub stddev: Option<f64>,
+}
+
 /// COG 전체 메타데이터 — 레벨 순서는 IFD 순서(본체=0, 오버뷰=1..).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CogMeta {
@@ -45,6 +55,9 @@ pub struct CogMeta {
     pub num_bands: u32,
     /// IFD0 GDAL_NODATA 태그 — 부재 시 None. GDAL 관행상 전 밴드 공통.
     pub nodata: Option<f64>,
+    /// IFD0 GDAL_METADATA 의 STATISTICS_* (§6.7 decode 없는 집계 재료) —
+    /// 태그 부재 시 None (fallback 은 RS_ZonalStats 의 decode 경로).
+    pub band_stats: Option<Vec<BandStats>>,
 }
 
 impl CogMeta {
@@ -123,6 +136,67 @@ impl Georef {
             self.origin_y - (row - 1) as f64 * self.pixel_y,
         )
     }
+}
+
+/// GDAL_METADATA XML 에서 밴드별 STATISTICS_* 를 뽑는다.
+///
+/// 형식(GDAL 산출): `<Item name="STATISTICS_MEAN" sample="0">32939.1</Item>` —
+/// sample 은 0-based 밴드, 생략 시 0. STATISTICS_* 항목이 하나도 없으면 None.
+/// XML 은 GDAL 이 기계 생성하는 단순 형태라 의존성 없이 스캔한다 (N7 무관 —
+/// TIFF 구조가 아니라 태그 "값" 파싱).
+fn parse_gdal_metadata_stats(xml: &str, num_bands: u32) -> Option<Vec<BandStats>> {
+    let mut bands = vec![
+        BandStats {
+            min: None,
+            max: None,
+            mean: None,
+            stddev: None,
+        };
+        num_bands as usize
+    ];
+    let mut found = false;
+    for item in xml.split("<Item ").skip(1) {
+        let Some(name_start) = item.find("name=\"") else {
+            continue;
+        };
+        let rest = &item[name_start + 6..];
+        let Some(name_end) = rest.find('\"') else {
+            continue;
+        };
+        let name = &rest[..name_end];
+        if !name.starts_with("STATISTICS_") {
+            continue;
+        }
+        let sample: usize = item
+            .find("sample=\"")
+            .and_then(|i| {
+                let r = &item[i + 8..];
+                r.find('\"').and_then(|j| r[..j].parse().ok())
+            })
+            .unwrap_or(0);
+        if sample >= bands.len() {
+            continue;
+        }
+        let Some(vs) = item.find('>') else { continue };
+        let Some(ve) = item[vs + 1..].find('<') else {
+            continue;
+        };
+        let value: Option<f64> = item[vs + 1..vs + 1 + ve].trim().parse().ok();
+        if value.is_none() {
+            continue;
+        }
+        let b = &mut bands[sample];
+        // 인식된 통계 필드가 하나라도 있어야 Some — VALID_PERCENT 등은 무시
+        match name {
+            "STATISTICS_MINIMUM" => b.min = value,
+            "STATISTICS_MAXIMUM" => b.max = value,
+            "STATISTICS_MEAN" => b.mean = value,
+            "STATISTICS_STDDEV" => b.stddev = value,
+            _ => continue,
+        }
+        found = true;
+    }
+    found.then_some(bands)
 }
 
 /// GDAL_NODATA 태그 문자열 파싱 — 공백 trim, "nan"(대소문자 무관) 지원.
@@ -235,6 +309,10 @@ pub(crate) fn build_meta(ifds: &[async_tiff::ImageFileDirectory]) -> Result<CogM
         .first()
         .and_then(|ifd0| ifd0.gdal_nodata())
         .and_then(parse_gdal_nodata);
+    let band_stats = ifds
+        .first()
+        .and_then(|ifd0| ifd0.gdal_metadata())
+        .and_then(|xml| parse_gdal_metadata_stats(xml, num_bands));
 
     // georeference 는 IFD0 에서만 (GDAL COG 관행 — 오버뷰엔 geo 태그가 없다)
     let georef = ifds.first().and_then(|ifd0| {
@@ -287,6 +365,7 @@ pub(crate) fn build_meta(ifds: &[async_tiff::ImageFileDirectory]) -> Result<CogM
         georef,
         num_bands,
         nodata,
+        band_stats,
     })
 }
 
@@ -385,6 +464,7 @@ mod tests {
             georef,
             num_bands: 1,
             nodata: Some(0.0),
+            band_stats: None,
         }
     }
 
@@ -449,6 +529,7 @@ mod tests {
             georef: Some(utm52(500000.0, 3800000.0)),
             num_bands: 1,
             nodata: Some(0.0),
+            band_stats: None,
         };
         let rows: Vec<TileRow> = enumerate_tiles(&meta).collect();
         assert_eq!(
@@ -479,6 +560,7 @@ mod tests {
             georef: None,
             num_bands: 0,
             nodata: None,
+            band_stats: None,
         };
         assert_eq!(empty.width(), None);
         assert_eq!(empty.height(), None);
@@ -508,6 +590,7 @@ mod tests {
             georef: Some(utm52(600000.0, 3900000.0)),
             num_bands: 3,
             nodata: None,
+            band_stats: None,
         };
         assert_eq!(mb.band_nodata(1), None);
         assert_eq!(mb.band_nodata(3), None);
