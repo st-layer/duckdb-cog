@@ -786,6 +786,84 @@ impl VScalar for RsBandAsArray {
     }
 }
 
+/// `RS_BandStats(path[, band])` — GDAL_METADATA 의 STATISTICS_* (§6.7).
+/// decode 없는 카탈로그 통계 — 태그 부재·범위 밖 밴드·NULL 인자 → NULL
+/// (fallback 은 RS_ZonalStats 의 decode 경로).
+struct RsBandStats;
+
+impl VScalar for RsBandStats {
+    type State = ();
+
+    fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let metas = meta_per_row("RS_BandStats", input)?;
+        let bands: Vec<Option<i32>> = if input.num_columns() > 1 {
+            let v = input.flat_vector(1);
+            // SAFETY: 컬럼 1 은 INTEGER 로 선언 — i32 표현.
+            let raw = unsafe { v.as_slice_with_len::<i32>(n) };
+            (0..n)
+                .map(|i| (!v.row_is_null(i as u64)).then(|| raw[i]))
+                .collect()
+        } else {
+            vec![Some(1); n]
+        };
+        let rows: Vec<Option<engine::BandStats>> = metas
+            .iter()
+            .zip(&bands)
+            .map(|(m, band)| {
+                let meta = m.as_deref()?;
+                let idx = usize::try_from((*band)? - 1).ok()?;
+                meta.band_stats.as_ref()?.get(idx).cloned()
+            })
+            .collect();
+
+        let mut sv = output.struct_vector();
+        type Pick = fn(&engine::BandStats) -> Option<f64>;
+        let fields: [(usize, Pick); 4] = [
+            (0, |b| b.min),
+            (1, |b| b.max),
+            (2, |b| b.mean),
+            (3, |b| b.stddev),
+        ];
+        for (ci, pick) in fields {
+            let vals: Vec<Option<f64>> = rows
+                .iter()
+                .map(|r| r.as_ref().and_then(pick))
+                .collect();
+            write_values(&mut sv.child(ci, n), &vals);
+        }
+        for (i, r) in rows.iter().enumerate() {
+            if r.is_none() {
+                sv.set_null(i);
+            }
+        }
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        let d = || LogicalTypeHandle::from(LogicalTypeId::Double);
+        let ret = || {
+            LogicalTypeHandle::struct_type(&[
+                ("min", d()),
+                ("max", d()),
+                ("mean", d()),
+                ("stddev", d()),
+            ])
+        };
+        vec![
+            ScalarFunctionSignature::exact(vec![LogicalTypeId::Varchar.into()], ret()),
+            ScalarFunctionSignature::exact(
+                vec![LogicalTypeId::Varchar.into(), LogicalTypeId::Integer.into()],
+                ret(),
+            ),
+        ]
+    }
+}
+
 /// `RS_ZonalStats(path, bbox DOUBLE[], band, stat)` — bbox 영역 집계 (RFC §6.8).
 /// zone 은 geometry 가 아니라 bbox (GEOS 비링크 N4 하의 적응, 문서화 이탈).
 /// stat ∈ {count, sum, mean, min, max} (대소문자 무관). 유효 픽셀 없으면
@@ -1099,6 +1177,7 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     con.register_scalar_function::<RsNormalizedDifference>("RS_NormalizedDifference")?;
     con.register_scalar_function::<RsZonalStats>("RS_ZonalStats")?;
     con.register_scalar_function::<RsBandAsArray>("RS_BandAsArray")?;
+    con.register_scalar_function::<RsBandStats>("RS_BandStats")?;
     con.register_scalar_function::<RsWorldToRasterCoord>("RS_WorldToRasterCoord")?;
     con.register_scalar_function::<RsRasterToWorldCoord>("RS_RasterToWorldCoord")?;
     Ok(())
