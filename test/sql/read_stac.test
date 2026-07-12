@@ -22,6 +22,7 @@ asset_key	VARCHAR
 href	VARCHAR
 media_type	VARCHAR
 bbox	STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE)
+band_stats	STRUCT(min DOUBLE, max DOUBLE, mean DOUBLE, stddev DOUBLE)[]
 
 # ItemCollection: 2 item × asset = 3행, graceful degradation (scene-b 결측 → NULL)
 query TTTTTT
@@ -65,3 +66,37 @@ statement error
 SELECT * FROM read_stac('test/data/stac/no_such.json');
 ----
 no_such.json
+
+# ---- raster:bands 통계 매핑 (§6.7): decode 없는 집계 재료 ----
+query TIRR
+SELECT asset_key, len(band_stats), band_stats[1].min, band_stats[1].stddev
+FROM read_stac('test/data/stac/with_stats.json') WHERE band_stats IS NOT NULL ORDER BY asset_key;
+----
+red	1	1.0	18918.9
+rgb	3	0.0	NULL
+
+# 부분 결측 graceful: rgb 밴드2 stddev 있음, 밴드3 전부 NULL
+query RRT
+SELECT band_stats[2].stddev, band_stats[3].mean, (band_stats[3].min IS NULL)::VARCHAR
+FROM read_stac('test/data/stac/with_stats.json') WHERE asset_key = 'rgb';
+----
+73.2	NULL	true
+
+# 확장 없는 asset·기존 카탈로그 → band_stats NULL
+query TT
+SELECT (band_stats IS NULL)::VARCHAR, asset_key FROM read_stac('test/data/stac/with_stats.json') WHERE asset_key = 'nostats';
+----
+true	nostats
+
+query I
+SELECT count(*) FROM read_stac('test/data/stac/items.json') WHERE band_stats IS NOT NULL;
+----
+0
+
+# decode 없는 집계: 카탈로그 통계만으로 자산 스캔
+query RR
+SELECT max(band_stats[1].max), avg(band_stats[1].mean)
+FROM read_stac('test/data/stac/with_stats.json') WHERE band_stats IS NOT NULL;
+----
+65535.0
+16447.8

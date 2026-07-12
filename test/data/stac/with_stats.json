@@ -1,0 +1,31 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "stats-scene",
+  "collection": "demo",
+  "bbox": [300000.0, 3994880.0, 305120.0, 4000000.0],
+  "geometry": null,
+  "properties": { "datetime": "2026-03-01T00:00:00Z" },
+  "assets": {
+    "red": {
+      "href": "basic_512x512_u16.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "raster:bands": [
+        {
+          "data_type": "uint16",
+          "nodata": 0,
+          "statistics": { "minimum": 1.0, "maximum": 65535.0, "mean": 32768.5, "stddev": 18918.9 }
+        }
+      ]
+    },
+    "rgb": {
+      "href": "multiband_64x64_u8.tif",
+      "raster:bands": [
+        { "statistics": { "minimum": 0.0, "maximum": 255.0, "mean": 127.1 } },
+        { "statistics": { "minimum": 2.0, "maximum": 254.0, "mean": 126.8, "stddev": 73.2 } },
+        {}
+      ]
+    },
+    "nostats": { "href": "tiny_16x16_u8.tif" }
+  }
+}

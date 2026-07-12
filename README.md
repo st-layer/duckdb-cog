@@ -41,7 +41,7 @@ Early Phase 1 — the metadata surface is functional; pixel access is next.
 | `RS_NormalizedDifference` (point-form band math, NDVI-style) | ✅ |
 | `RS_ZonalStats` (bbox zones, count/sum/mean/min/max) | ✅ |
 | `RS_BandAsArray` (full band or bbox window, row-major) | ✅ |
-| `read_stac(url)` — STAC Item/ItemCollection to (item, asset) rows | ✅ |
+| `read_stac(url)` — STAC items to (item, asset) rows incl. `raster:bands` statistics (decode-free aggregation) | ✅ |
 
 ## SQL surface
 

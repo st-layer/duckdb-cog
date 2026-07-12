@@ -5,6 +5,15 @@
 
 use serde_json::Value;
 
+/// raster:bands 확장의 밴드별 통계 — 필드 단위 부분 결측 허용 (graceful).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BandStats {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub mean: Option<f64>,
+    pub stddev: Option<f64>,
+}
+
 /// read_stac() 한 행 — (item, asset) 조합.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StacAssetRow {
@@ -16,6 +25,8 @@ pub struct StacAssetRow {
     pub media_type: Option<String>,
     /// [xmin, ymin, xmax, ymax] — 2D(4원소)·3D(6원소, z 제외) 모두 수용.
     pub bbox: Option<[f64; 4]>,
+    /// raster:bands 통계 (§6.7 decode 없는 집계 재료) — 확장 부재 시 None.
+    pub band_stats: Option<Vec<BandStats>>,
 }
 
 #[derive(Debug)]
@@ -86,6 +97,24 @@ fn item_rows(item: &Value) -> Result<Vec<StacAssetRow>, StacError> {
             let Some(href) = asset.get("href").and_then(Value::as_str) else {
                 continue;
             };
+            let band_stats = asset
+                .get("raster:bands")
+                .and_then(Value::as_array)
+                .map(|bands| {
+                    bands
+                        .iter()
+                        .map(|b| {
+                            let st = b.get("statistics");
+                            let g = |k: &str| st.and_then(|s| s.get(k)).and_then(Value::as_f64);
+                            BandStats {
+                                min: g("minimum"),
+                                max: g("maximum"),
+                                mean: g("mean"),
+                                stddev: g("stddev"),
+                            }
+                        })
+                        .collect()
+                });
             out.push(StacAssetRow {
                 item_id: item_id.clone(),
                 collection: collection.clone(),
@@ -94,6 +123,7 @@ fn item_rows(item: &Value) -> Result<Vec<StacAssetRow>, StacError> {
                 href: href.to_string(),
                 media_type: asset.get("type").and_then(Value::as_str).map(String::from),
                 bbox,
+                band_stats,
             });
         }
     }
