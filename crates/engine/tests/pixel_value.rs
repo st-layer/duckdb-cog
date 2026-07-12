@@ -231,3 +231,23 @@ fn band_window_contract() {
     // 역전 bbox → 에러
     assert!(block_on(reader.band_window(&meta, Some([1.0, 0.0, 0.0, 1.0]), 1)).is_err());
 }
+
+/// §6.7: GDAL_METADATA STATISTICS_* → CogMeta.band_stats (decode 없는 집계 재료).
+#[test]
+fn gdal_metadata_statistics_are_mapped() {
+    let (meta, _) = block_on(open_cog(fixture("stats_64x64_u16.tif"))).expect("valid COG");
+    let bands = meta.band_stats.as_ref().expect("STATISTICS_* 태그 있음");
+    assert_eq!(bands.len(), 1);
+    assert_eq!(
+        (bands[0].min, bands[0].max, bands[0].mean, bands[0].stddev),
+        (
+            Some(33.0),
+            Some(65477.0),
+            Some(32939.121338),
+            Some(18924.488017)
+        )
+    );
+    // 태그 없는 픽스처 → None (graceful — decode fallback 은 RS_ZonalStats 몫)
+    let (meta, _) = block_on(open_cog(fixture("basic_512x512_u16.tif"))).expect("valid COG");
+    assert!(meta.band_stats.is_none());
+}
