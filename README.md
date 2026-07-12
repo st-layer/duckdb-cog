@@ -21,6 +21,13 @@ SELECT s.item_id, RS_Width(s.href), RS_SRID(s.href)
 FROM read_stac('https://example.com/catalog/items.json') s
 WHERE s.media_type LIKE '%geotiff%';
 
+-- Search a live STAC API (POST /search, pagination followed automatically):
+SELECT item_id, datetime, href
+FROM read_stac_search('https://earth-search.aws.element84.com/v1/search',
+                      collections := ['sentinel-2-l2a'],
+                      bbox := [126.0, 37.0, 127.0, 38.0],
+                      datetime := '2026-07-01/2026-07-12');
+
 -- Sedona-style metadata accessors:
 SELECT RS_Width(f), RS_Height(f), RS_NumBands(f), RS_SRID(f), RS_MetaData(f)
 FROM (SELECT 's3://my-bucket/ortho.tif' AS f);
@@ -43,6 +50,7 @@ Early Phase 1 — the metadata surface is functional; pixel access is next.
 | `RS_BandAsArray` (full band or bbox window, row-major) | ✅ |
 | `RS_BandStats` — GDAL_METADATA statistics without decoding | ✅ |
 | `read_stac(url)` — STAC items to (item, asset) rows incl. `raster:bands` statistics (decode-free aggregation) | ✅ |
+| `read_stac_search(url, collections/bbox/datetime/limit, max_rows)` — STAC API POST /search with `rel=next` pagination (row cap 1,000 by default) | ✅ |
 
 ## SQL surface
 

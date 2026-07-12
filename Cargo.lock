@@ -523,6 +523,7 @@ dependencies = [
  "duckdb",
  "engine",
  "object_store",
+ "reqwest",
  "tokio",
  "url",
 ]
