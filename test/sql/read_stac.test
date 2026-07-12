@@ -22,7 +22,7 @@ asset_key	VARCHAR
 href	VARCHAR
 media_type	VARCHAR
 bbox	STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE)
-band_stats	STRUCT("min" DOUBLE, "max" DOUBLE, mean DOUBLE, stddev DOUBLE)[]
+band_stats	STRUCT(min DOUBLE, max DOUBLE, mean DOUBLE, stddev DOUBLE)[]
 
 # ItemCollection: 2 item × asset = 3행, graceful degradation (scene-b 결측 → NULL)
 query TTTTTT

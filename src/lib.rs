@@ -436,6 +436,16 @@ impl VTab for ReadStacVTab {
                 ("ymax", double()),
             ]),
         );
+        // raster:bands 통계 (§6.7) — 확장 부재 시 NULL
+        bind.add_result_column(
+            "band_stats",
+            LogicalTypeHandle::list(&LogicalTypeHandle::struct_type(&[
+                ("min", double()),
+                ("max", double()),
+                ("mean", double()),
+                ("stddev", double()),
+            ])),
+        );
         let url = bind.get_parameter(0).to_string();
         let source = open_source(&url).map_err(|e| format!("read_stac: {e}"))?;
         let bytes = engine::futures::executor::block_on(engine::fetch_all(&source))
@@ -504,6 +514,59 @@ impl VTab for ReadStacVTab {
                     bbox.set_null(i);
                 }
             }
+        }
+        // band_stats LIST(STRUCT(...)): 자식 struct 를 평탄화해 채운다
+        {
+            let mut lv = output.list_vector(7);
+            let mut offsets = Vec::with_capacity(batch.len());
+            let mut total = 0usize;
+            for row in batch {
+                offsets.push(total);
+                total += row.band_stats.as_ref().map_or(0, Vec::len);
+            }
+            let sv = lv.struct_child(total);
+            type Pick = fn(&engine::BandStats) -> Option<f64>;
+            let fields: [(usize, Pick); 4] = [
+                (0, |b| b.min),
+                (1, |b| b.max),
+                (2, |b| b.mean),
+                (3, |b| b.stddev),
+            ];
+            for (ci, pick) in fields {
+                let mut child = sv.child(ci, total);
+                // SAFETY: 자식 필드는 DOUBLE — f64 표현, total 로 용량 확보됨.
+                {
+                    let slice = unsafe { child.as_mut_slice::<f64>() };
+                    for (i, row) in batch.iter().enumerate() {
+                        if let Some(bands) = &row.band_stats {
+                            for (k, b) in bands.iter().enumerate() {
+                                if let Some(v) = pick(b) {
+                                    slice[offsets[i] + k] = v;
+                                }
+                            }
+                        }
+                    }
+                }
+                for (i, row) in batch.iter().enumerate() {
+                    if let Some(bands) = &row.band_stats {
+                        for (k, b) in bands.iter().enumerate() {
+                            if pick(b).is_none() {
+                                child.set_null(offsets[i] + k);
+                            }
+                        }
+                    }
+                }
+            }
+            for (i, row) in batch.iter().enumerate() {
+                match &row.band_stats {
+                    None => {
+                        lv.set_entry(i, offsets[i], 0);
+                        lv.set_null(i);
+                    }
+                    Some(bands) => lv.set_entry(i, offsets[i], bands.len()),
+                }
+            }
+            lv.set_len(total);
         }
         output.set_len(batch.len());
         Ok(())

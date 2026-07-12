@@ -25,7 +25,7 @@ pub use pixel::{apply_nodata, normalized_difference, open_cog, CogReader, ZonalS
 #[cfg(feature = "reader")]
 pub use source::{fetch_all, ByteSource, MemorySource, SourceError};
 #[cfg(feature = "reader")]
-pub use stac::{parse_stac, StacAssetRow, StacError};
+pub use stac::{parse_stac, BandStats, StacAssetRow, StacError};
 // ByteSource 구현자가 시그니처 타입(Bytes, BoxFuture)과 block_on 을 별도 의존성
 // 없이 쓰도록 재수출.
 #[cfg(feature = "reader")]
