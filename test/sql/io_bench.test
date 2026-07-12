@@ -1,0 +1,77 @@
+# name: test/sql/io_bench.test
+# description: cog_io_bench — §6.5(b) DuckDB FileSystem 브릿지 실측 하네스 (이슈 #30, experimental).
+#   (a) object_store/file 소스와 (b) DuckDB FileSystem C-API 소스를 같은 엔진 워크로드
+#   (메타 → 산개 포인트 → 중앙 창 zonal)로 돌려 fetch 횟수·바이트·체크섬을 행으로 노출한다.
+# group: [cog]
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# 메트릭 행 12개가 모두 존재 (io = duckdb_fs — (b) 경로가 실제로 열리고 읽힌다)
+query T
+SELECT metric FROM cog_io_bench('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', io := 'duckdb_fs') ORDER BY metric;
+----
+meta_bytes
+meta_fetches
+meta_ms
+open_ms
+points_bytes
+points_checksum
+points_fetches
+points_ms
+window_bytes
+window_checksum
+window_fetches
+window_ms
+
+# T5 성질 계승 ((b) 경로에서도): 메타 fetch 는 상수 규모(≤8)이고 읽은 바이트는
+# 파일 크기의 1/4 미만 (픽셀 영역 미침범), 픽셀 워크로드는 실제 fetch 를 발생시킨다.
+query IIII
+WITH m AS (
+    SELECT metric, value
+    FROM cog_io_bench('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', io := 'duckdb_fs')
+), f AS (
+    SELECT octet_length(content)::DOUBLE AS len
+    FROM read_blob('${COG_TEST_FIXTURES}/basic_512x512_u16.tif')
+)
+SELECT (SELECT (value BETWEEN 1 AND 8)::INT FROM m WHERE metric = 'meta_fetches'),
+       (SELECT (value * 4 < (SELECT len FROM f))::INT FROM m WHERE metric = 'meta_bytes'),
+       (SELECT (value >= 1)::INT FROM m WHERE metric = 'points_fetches'),
+       (SELECT (value > 0)::INT FROM m WHERE metric = 'window_bytes');
+----
+1	1	1	1
+
+# 패리티: (a) file 소스와 (b) duckdb_fs 소스는 같은 픽셀값을 읽는다 —
+# 체크섬(픽셀값 합, u16 이라 f64 정수 합산은 순서 무관 정확)이 일치해야 한다.
+query TI
+SELECT a.metric, (a.value = b.value)::INT
+FROM cog_io_bench('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', io := 'file') a
+JOIN cog_io_bench('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', io := 'duckdb_fs') b USING (metric)
+WHERE a.metric IN ('points_checksum', 'window_checksum')
+ORDER BY a.metric;
+----
+points_checksum	1
+window_checksum	1
+
+# 정합 앵커: window_checksum(중앙 절반 extent 의 픽셀 합)은 오라클(T1)로 검증된
+# RS_ZonalStats 'sum' 과 정확히 같아야 한다. basic 픽스처: origin (300000, 4000000),
+# 10m 픽셀, 512² → 중앙 절반 extent = [301280, 3996160, 303840, 3998720].
+query I
+SELECT ((SELECT value FROM cog_io_bench('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', io := 'duckdb_fs') WHERE metric = 'window_checksum')
+        = RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [301280.0, 3996160.0, 303840.0, 3998720.0], 1, 'sum'))::INT;
+----
+1
+
+# EOF 클램프 계약: 32KiB(readahead 선요청) 미만 COG 도 (b) 경로로 읽힌다 —
+# DuckDB FileHandle 위에서도 소스가 가용 분까지 클램프해야 한다.
+query I
+SELECT count(*) FROM cog_io_bench('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', io := 'duckdb_fs');
+----
+12
+
+# io 인자 검증: 모르는 모드는 에러
+statement error
+SELECT * FROM cog_io_bench('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', io := 'bogus');
+----
+io
