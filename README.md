@@ -35,7 +35,9 @@ FROM (SELECT 's3://my-bucket/ortho.tif' AS f);
 
 ## Status
 
-Early Phase 1 — the metadata surface is functional; pixel access is next.
+Phase 1–2 engineering complete — metadata, pixel access, STAC (documents and
+API search) are functional and oracle-tested; release gates (naming,
+community-extensions registration) are pending.
 
 | Capability | State |
 | -- | -- |
@@ -51,6 +53,30 @@ Early Phase 1 — the metadata surface is functional; pixel access is next.
 | `RS_BandStats` — GDAL_METADATA statistics without decoding | ✅ |
 | `read_stac(url)` — STAC items to (item, asset) rows incl. `raster:bands` statistics (decode-free aggregation) | ✅ |
 | `read_stac_search(url, collections/bbox/datetime/page_size, max_rows)` — STAC API POST /search with `rel=next` pagination (row cap 1,000 by default) | ✅ |
+
+## Performance
+
+Apple Silicon (macOS arm64), release build, 2026-07-12. Local workloads run
+against a 4096² uint16 DEFLATE COG with 256 px tiles (median of 5, cold =
+fresh connection); remote against a real Sentinel-2 B04 scene (10980²) over
+`https://`.
+
+| workload | time |
+| -- | -- |
+| cold metadata → first answer (local) | 3.8 ms |
+| tile inventory, all levels (warm) | 0.5 ms |
+| 1,000-point sampling — `RS_Values` batch / `RS_Value` per-row | 8.0 ms / 21.3 ms |
+| zonal mean over a 1024² window | 2.9 ms |
+| remote cold metadata (real Sentinel-2 B04) | 0.84 s |
+| remote repeat metadata (process-wide cache) | 0.4 ms |
+
+Ingest cost is zero by design — the file is queryable in place. Cross-engine
+context (PostGIS raster, GDAL-based `raster` extension, raquet) and the I/O
+path study live in
+[`docs/benchmarks/2026-07-12-comparative.md`](docs/benchmarks/2026-07-12-comparative.md)
+and
+[`docs/benchmarks/2026-07-12-io-path-ab.md`](docs/benchmarks/2026-07-12-io-path-ab.md);
+reproduce with `scripts/bench_compare.py` and `scripts/bench_io_compare.py`.
 
 ## SQL surface
 
