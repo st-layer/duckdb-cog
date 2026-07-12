@@ -81,6 +81,18 @@ works out of the box, plain `http://` is enabled automatically, `s3://` reads
 credentials from the standard `AWS_*` environment variables (for plain-http S3
 endpoints such as MinIO, set `AWS_ALLOW_HTTP=true`).
 
+**Public S3 buckets** (e.g. the AWS Sentinel-2 open data): virtual-host style
+`https://<bucket>.s3.<region>.amazonaws.com/...` URLs are recognized as S3 —
+without credentials the client probes the EC2 metadata service and hangs
+through retries. Set `AWS_SKIP_SIGNATURE=true` for anonymous access:
+
+```sh
+AWS_SKIP_SIGNATURE=true duckdb -unsigned -c "
+  LOAD 'cog.duckdb_extension';
+  SELECT RS_Width(f), RS_SRID(f) FROM (SELECT
+    'https://sentinel-cogs.s3.us-west-2.amazonaws.com/.../B04.tif' AS f);"
+```
+
 ## Design invariants
 
 These are enforced by tests and hooks, not just convention (see
