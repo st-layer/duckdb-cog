@@ -5,6 +5,8 @@ name = "cog"                 # → libcog.so → cog.duckdb_extension
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "GDAL-free Cloud-Optimized GeoTIFF reader extension for DuckDB"
+repository = "https://github.com/st-layer/duckdb-cog"
 
 [lib]
 crate-type = ["cdylib"]
