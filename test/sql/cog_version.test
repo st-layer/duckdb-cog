@@ -14,4 +14,4 @@ require cog
 query I
 SELECT * FROM cog_version();
 ----
-duckdb-cog 0.0.1
+duckdb-cog 0.1.0
