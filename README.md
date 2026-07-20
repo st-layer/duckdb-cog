@@ -44,7 +44,7 @@ community-extensions registration) are pending.
 | `read_cog(path)` tile-grid listing (levels, overviews, per-tile bbox, CRS) | ✅ |
 | Local file, `http(s)://`, `s3://` sources (object_store; env credentials) | ✅ |
 | `RS_*` metadata accessors (Width/Height/NumBands/Scale/Skew/UpperLeft/SRID/BandNoDataValue/MetaData/GeoReference) | ✅ |
-| Lazy IO contract (metadata listing ≤ a few range GETs, pixels untouched) | ✅ tested |
+| Lazy IO contract (metadata listing ≤ a few range GETs, pixels untouched) | ✅ |
 | `RS_Value(path, x, y[, band])` pixel access (level 0, no interpolation, rasterio-verified) | ✅ |
 | `RS_Values` batch pixel access (per-tile single fetch+decode) | ✅ |
 | `RS_NormalizedDifference` (point-form band math, NDVI-style) | ✅ |
@@ -80,7 +80,10 @@ reproduce with `scripts/bench_compare.py` and `scripts/bench_io_compare.py`.
 
 ## SQL surface
 
-### `read_cog(path VARCHAR)` → table
+### `read_cog(path VARCHAR, bbox := [xmin, ymin, xmax, ymax])` → table
+
+The optional `bbox` named parameter (native-CRS coordinates) prunes the tile
+list to tiles intersecting the box.
 
 One row per physical tile across all resolution levels (level 0 = full
 resolution, 1.. = embedded overviews):
@@ -107,6 +110,10 @@ unknown.
 `RS_UpperLeftX/Y` · `RS_SRID` · `RS_BandNoDataValue(path[, band])` ·
 `RS_MetaData` (named STRUCT) · `RS_GeoReference` (GDAL 6-line text) ·
 `RS_Value(path, x, y[, band])` · `RS_Values(path, xs[], ys[][, band])` ·
+`RS_NormalizedDifference(path, x, y, band1, band2)` (point-form, NDVI-style) ·
+`RS_ZonalStats(path, bbox[], band, stat)` (stat: `count`/`sum`/`mean`/`min`/`max`) ·
+`RS_BandAsArray(path, band[, bbox[]])` (row-major `DOUBLE[]`) ·
+`RS_BandStats(path[, band])` (GDAL_METADATA statistics, decode-free) ·
 `RS_WorldToRasterCoord` / `RS_RasterToWorldCoord` (1-based)
 
 ### Remote sources
@@ -151,6 +158,18 @@ These are enforced by tests and hooks, not just convention (see
   COG's tile grid costs a constant number of range reads and never touches
   pixel data.
 - The engine crate stays `wasm32-unknown-unknown`-compilable.
+
+## Installation
+
+Once the community-extensions registration is accepted (submission pending
+review), installation is:
+
+```sql
+INSTALL cog FROM community;
+LOAD cog;
+```
+
+Until then, build locally (below) and load the unsigned binary.
 
 ## Building
 
