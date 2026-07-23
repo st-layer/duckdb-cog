@@ -11,7 +11,7 @@ dependencies = [
     "pytest>=8",
     # E2E 원격 IO 테스트용 Range GET 지원 정적 서버 (ext-test 가 픽스처 서빙에 사용)
     "rangehttpserver==1.4.0",
-    "duckdb==1.5.4",
+    "duckdb==1.5.5",
 ]
 
 [tool.uv]

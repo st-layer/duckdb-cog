@@ -1,7 +1,7 @@
 # duckdb-cog 개발/에이전트 판정 명령. 익스텐션 표준 빌드는 Makefile(템플릿) 담당.
 # duckdb-loadable-macros 가 컴파일 시 요구하는 env:
 export DUCKDB_EXTENSION_NAME := "cog"
-export DUCKDB_EXTENSION_MIN_DUCKDB_VERSION := "v1.5.4"
+export DUCKDB_EXTENSION_MIN_DUCKDB_VERSION := "v1.5.5"
 
 # rustup 툴체인 우선 (homebrew cargo 1.86 은 async-tiff MSRV ≥1.87 미달).
 # rust-toolchain.toml 은 배포 CI의 잡별 툴체인 관리와 충돌해 쓰지 않는다 (PR #3) —
