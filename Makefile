@@ -10,7 +10,7 @@ EXTENSION_NAME=cog
 USE_UNSTABLE_C_API=1
 
 # Target DuckDB version
-TARGET_DUCKDB_VERSION=v1.5.4
+TARGET_DUCKDB_VERSION=v1.5.5
 
 all: configure debug
 
