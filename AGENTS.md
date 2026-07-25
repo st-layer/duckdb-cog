@@ -4,6 +4,11 @@ GDAL-free COG reader for DuckDB. Cloud-Optimized GeoTIFF를 재인코딩·재투
 제자리에서(in-place) 읽어 SQL 테이블로 노출하는 익스텐션.
 
 설계 준거: `docs/RFC-001-rev3.md` (필독). 개발 프로세스: `docs/HARNESS.md`.
+릴리스·배포(community-extensions): `docs/RELEASE.md`.
+
+**세션 시작 시 `docs/worklog/` 의 최신 파일을 먼저 읽어라** — 릴리스/등록/배포의
+현재 상태가 거기 있다 (예: 이름은 `cog` 로 확정, CE 등록 완료 — "이름 정하기"
+단계가 아니다). worklog 는 gitignore 된 로컬 인수인계 채널이다.
 
 ## 판정 (verification)
 
@@ -55,3 +60,6 @@ GDAL-free COG reader for DuckDB. Cloud-Optimized GeoTIFF를 재인코딩·재투
 - 태스크는 수직 슬라이스로: 픽스처 1개 → 기능 최소 경로 → 테스트 1개 통과.
 - TDD 순서: 테스트 작성 → 실패 확인 → 실패 테스트 커밋 → 구현 → `just check` 그린.
 - 세션이 길어지면 요약을 `docs/worklog/` 에 남기고 새 세션으로.
+- **릴리스는 `docs/RELEASE.md` 절차를 따른다** — 버전은 릴리스 행위에만 붙는다
+  (머지≠버전업). CE 배포는 ref-bump PR 로만 갱신되며, **외부 리포(duckdb/*) 로
+  나가는 PR·코멘트는 오너 건별 승인 후 제출한다.**
