@@ -74,3 +74,91 @@ SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300000.0, 39
        RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', [300000.0, 3999000.0, 301000.0, 4000000.0], 9, 'sum');
 ----
 0	NULL
+
+# ─── polygon zone (WKT VARCHAR 오버로드, #48) — rasterio geometry_mask 오라클 수치 ───
+
+# P1: 4타일에 걸치는 오목(U-notch)+구멍 폴리곤 (픽셀 중심 포함, nodata 제외)
+query IIRII
+SELECT RS_ZonalStats(f, w, 1, 'count')::BIGINT,
+       RS_ZonalStats(f, w, 1, 'sum')::BIGINT,
+       round(RS_ZonalStats(f, w, 1, 'mean'), 4),
+       RS_ZonalStats(f, w, 1, 'min')::BIGINT,
+       RS_ZonalStats(f, w, 1, 'max')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f,
+             'POLYGON ((301203.7 3995803.7, 304003.7 3995803.7, 304003.7 3998803.7, 303203.7 3998803.7, 303203.7 3996803.7, 302203.7 3996803.7, 302203.7 3998803.7, 301203.7 3998803.7, 301203.7 3995803.7), (303403.7 3996003.7, 303803.7 3996003.7, 303803.7 3996403.7, 303403.7 3996403.7, 303403.7 3996003.7))' AS w);
+----
+62400	2043359680	32746.1487	1	65535
+
+# 폴리곤 vs 같은 extent 의 envelope bbox — notch+구멍 픽셀이 제외되어야 한다 (변별력)
+query II
+SELECT RS_ZonalStats(f, w, 1, 'count')::BIGINT,
+       RS_ZonalStats(f, [301203.7, 3995803.7, 304003.7, 3998803.7], 1, 'count')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f,
+             'POLYGON ((301203.7 3995803.7, 304003.7 3995803.7, 304003.7 3998803.7, 303203.7 3998803.7, 303203.7 3996803.7, 302203.7 3996803.7, 302203.7 3998803.7, 301203.7 3998803.7, 301203.7 3995803.7), (303403.7 3996003.7, 303803.7 3996003.7, 303803.7 3996403.7, 303403.7 3996403.7, 303403.7 3996003.7))' AS w);
+----
+62400	84000
+
+# MULTIPOLYGON: 타일 경계(x=302560) 양쪽 정사각형 2개
+query IIII
+SELECT RS_ZonalStats(f, w, 1, 'count')::BIGINT,
+       RS_ZonalStats(f, w, 1, 'sum')::BIGINT,
+       RS_ZonalStats(f, w, 1, 'min')::BIGINT,
+       RS_ZonalStats(f, w, 1, 'max')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f,
+             'MULTIPOLYGON (((301003.7 3999003.7, 301503.7 3999003.7, 301503.7 3999503.7, 301003.7 3999503.7, 301003.7 3999003.7)), ((303003.7 3999003.7, 303503.7 3999003.7, 303503.7 3999503.7, 303003.7 3999503.7, 303003.7 3999003.7)))' AS w);
+----
+5000	165209622	29	65516
+
+# 빗변 삼각형 — 비축정렬 PIP
+query II
+SELECT RS_ZonalStats(f, 'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))', 1, 'count')::BIGINT,
+       RS_ZonalStats(f, 'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))', 1, 'sum')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+7267	239110784
+
+# 폴리곤 zone 에서도 nodata 픽셀 제외 (2x2 덮개, 구멍 1개 → 유효 3)
+query IIII
+SELECT RS_ZonalStats(f, w, 1, 'count')::BIGINT,
+       RS_ZonalStats(f, w, 1, 'sum')::BIGINT,
+       RS_ZonalStats(f, w, 1, 'min')::BIGINT,
+       RS_ZonalStats(f, w, 1, 'max')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/nodatahole_64x64_u16.tif' AS f,
+             'POLYGON ((900001.3 3999981.3, 900018.7 3999981.3, 900018.7 3999998.7, 900001.3 3999998.7, 900001.3 3999981.3))' AS w);
+----
+3	26257	5849	14370
+
+# POLYGON EMPTY / extent 밖 폴리곤 → count 0, mean NULL (bbox 역전과 달리 에러 아님)
+query IRI
+SELECT RS_ZonalStats(f, 'POLYGON EMPTY', 1, 'count')::BIGINT,
+       RS_ZonalStats(f, 'POLYGON EMPTY', 1, 'mean'),
+       RS_ZonalStats(f, 'POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))', 1, 'count')::BIGINT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+0	NULL	0
+
+# 폴리곤 zone 에서 범위 밖 밴드: count → 0, sum → NULL (bbox 와 동일 비대칭)
+query IR
+SELECT RS_ZonalStats(f, 'POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))', 9, 'count')::BIGINT,
+       RS_ZonalStats(f, 'POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))', 9, 'sum')
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+0	NULL
+
+# NULL zone (VARCHAR 타입) → NULL
+query R
+SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', CAST(NULL AS VARCHAR), 1, 'mean');
+----
+NULL
+
+# POLYGON/MULTIPOLYGON 외 타입 → 에러
+statement error
+SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', 'POINT (1 2)', 1, 'mean');
+----
+zone
+
+# WKT 문법 오류 → 에러
+statement error
+SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', 'not wkt', 1, 'mean');
+----
+zone

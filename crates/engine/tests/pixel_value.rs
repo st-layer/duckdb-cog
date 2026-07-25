@@ -202,6 +202,88 @@ fn zonal_stats_excludes_nodata_and_handles_empty() {
     );
 }
 
+/// #48 polygon zone: rasterio geometry_mask 오라클 수치 (픽셀 중심 포함, nodata 제외).
+#[test]
+fn zonal_stats_polygon_matches_oracle_numbers() {
+    use engine::parse_zone_wkt;
+    let (meta, reader) = block_on(open_cog(fixture("basic_512x512_u16.tif"))).expect("valid COG");
+    // P1: 4타일에 걸치는 오목(U-notch) + 구멍 폴리곤 (꼭짓점은 …3.7 — 중심 격자 비정렬)
+    let p1 = parse_zone_wkt(
+        "POLYGON ((301203.7 3995803.7, 304003.7 3995803.7, 304003.7 3998803.7, \
+         303203.7 3998803.7, 303203.7 3996803.7, 302203.7 3996803.7, \
+         302203.7 3998803.7, 301203.7 3998803.7, 301203.7 3995803.7), \
+         (303403.7 3996003.7, 303803.7 3996003.7, 303803.7 3996403.7, \
+         303403.7 3996403.7, 303403.7 3996003.7))",
+    )
+    .expect("valid WKT");
+    let z = block_on(reader.zonal_stats_polygon(&meta, &p1, 1)).expect("io ok");
+    assert_eq!(z.count, 62_400);
+    assert_eq!(z.sum, 2_043_359_680.0);
+    assert_eq!(z.min, Some(1.0));
+    assert_eq!(z.max, Some(65_535.0));
+    // 변별력: 같은 extent 의 envelope bbox 는 notch+구멍까지 포함해 더 많다
+    let env = block_on(reader.zonal_stats(&meta, [301203.7, 3995803.7, 304003.7, 3998803.7], 1))
+        .expect("io ok");
+    assert_eq!(env.count, 84_000);
+    // P2: 타일 경계(x=302560) 양쪽의 MULTIPOLYGON
+    let p2 = parse_zone_wkt(
+        "MULTIPOLYGON (((301003.7 3999003.7, 301503.7 3999003.7, 301503.7 3999503.7, \
+         301003.7 3999503.7, 301003.7 3999003.7)), \
+         ((303003.7 3999003.7, 303503.7 3999003.7, 303503.7 3999503.7, \
+         303003.7 3999503.7, 303003.7 3999003.7)))",
+    )
+    .expect("valid WKT");
+    let z2 = block_on(reader.zonal_stats_polygon(&meta, &p2, 1)).expect("io ok");
+    assert_eq!(
+        (z2.count, z2.sum, z2.min, z2.max),
+        (5_000, 165_209_622.0, Some(29.0), Some(65_516.0))
+    );
+    // P3: 빗변 삼각형 — 비축정렬 PIP
+    let p3 = parse_zone_wkt(
+        "POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, \
+         300203.7 3999803.7))",
+    )
+    .expect("valid WKT");
+    let z3 = block_on(reader.zonal_stats_polygon(&meta, &p3, 1)).expect("io ok");
+    assert_eq!(
+        (z3.count, z3.sum, z3.min, z3.max),
+        (7_267, 239_110_784.0, Some(18.0), Some(65_532.0))
+    );
+}
+
+/// #48 polygon zone 경계 사례: nodata 제외·빈 집계·파싱 거부.
+#[test]
+fn zonal_stats_polygon_edge_cases() {
+    use engine::parse_zone_wkt;
+    let (meta, reader) =
+        block_on(open_cog(fixture("nodatahole_64x64_u16.tif"))).expect("valid COG");
+    // P4: nodata 구멍을 덮는 2x2 폴리곤 — 기존 bbox 테스트와 동일 수치 (교차 검증)
+    let p4 = parse_zone_wkt(
+        "POLYGON ((900001.3 3999981.3, 900018.7 3999981.3, 900018.7 3999998.7, \
+         900001.3 3999998.7, 900001.3 3999981.3))",
+    )
+    .expect("valid WKT");
+    let z = block_on(reader.zonal_stats_polygon(&meta, &p4, 1)).expect("io ok");
+    assert_eq!(
+        (z.count, z.sum, z.min, z.max),
+        (3, 26_257.0, Some(5849.0), Some(14_370.0))
+    );
+    // 범위 밖 밴드 → 빈 집계
+    let nb = block_on(reader.zonal_stats_polygon(&meta, &p4, 9)).expect("io ok");
+    assert_eq!((nb.count, nb.min), (0, None));
+    // EMPTY / extent 밖 폴리곤 → 빈 집계 (bbox 역전과 달리 에러 아님)
+    let empty = parse_zone_wkt("POLYGON EMPTY").expect("EMPTY 허용");
+    let ze = block_on(reader.zonal_stats_polygon(&meta, &empty, 1)).expect("io ok");
+    assert_eq!(ze.count, 0);
+    let far = parse_zone_wkt("POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))").expect("valid WKT");
+    let zf = block_on(reader.zonal_stats_polygon(&meta, &far, 1)).expect("io ok");
+    assert_eq!((zf.count, zf.min), (0, None));
+    // POLYGON/MULTIPOLYGON 외 타입·문법 오류 → 파싱 거부
+    assert!(parse_zone_wkt("POINT (1 2)").is_err());
+    assert!(parse_zone_wkt("LINESTRING (0 0, 1 1)").is_err());
+    assert!(parse_zone_wkt("not wkt").is_err());
+}
+
 /// 밴드 → 배열: row-major, nodata None 원소, 빈 윈도/범위 밖 밴드 구분.
 #[test]
 fn band_window_contract() {

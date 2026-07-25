@@ -13,6 +13,7 @@ use crate::meta::{
     build_meta, new_metadata_fetch, read_ifds, CogMeta, Georef, LevelMeta, MetaError,
 };
 use crate::source::{ByteSource, FetchAdapter};
+use crate::zone::Zone;
 
 /// 열린 COG 핸들 — IFD 체인을 보관해 픽셀 fetch 에 재사용한다.
 ///
@@ -229,6 +230,21 @@ impl<S: ByteSource> CogReader<S> {
             }
         }
         Ok(acc)
+    }
+
+    /// polygon zone 안에 **픽셀 중심**이 드는 level 0 픽셀들의 집계 (#48).
+    ///
+    /// bbox zonal 과 동일 규약 (nodata 제외, count 0 빈 집계) — zone 은
+    /// envelope → [`center_window`] 로 좁힌 뒤 픽셀 중심 좌표를 PIP 로 거른다.
+    /// EMPTY·교차 없음·범위 밖 밴드 → 빈 집계. georef 없음 → 에러.
+    pub async fn zonal_stats_polygon(
+        &self,
+        meta: &CogMeta,
+        zone: &Zone,
+        band: u32,
+    ) -> Result<ZonalStats, MetaError> {
+        let _ = (meta, zone, band);
+        Err(MetaError::Tiff("zonal_stats_polygon: unimplemented".into()))
     }
 
     /// 밴드를 row-major `Vec<Option<f64>>` 로 읽는다 (RS_BandAsArray 재료).

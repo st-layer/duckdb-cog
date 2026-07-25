@@ -163,3 +163,71 @@ def test_zonal_stats_matches_numpy_windows(con):
                 assert q("mean") == pytest.approx(a.mean())
                 assert q("min") == a.min()
                 assert q("max") == a.max()
+
+
+def test_zonal_stats_polygon_matches_geometry_mask(con):
+    """폴리곤 zone (WKT) == geometry_mask+numpy — 고정 P1 + 무작위 notch 6개 × basic/edge (#48)."""
+    import numpy as np
+    from rasterio.features import geometry_mask
+
+    def snap(v):
+        # 픽셀 중심(…5) 비정렬 좌표(…3.7)로 스냅 — on-edge 퇴화 방지
+        return round(v / 10.0) * 10.0 + 3.7
+
+    def ring_wkt(r):
+        return "(" + ", ".join(f"{x} {y}" for x, y in r) + ")"
+
+    def wkt_of(geom):
+        if geom["type"] == "Polygon":
+            return "POLYGON (" + ", ".join(ring_wkt(r) for r in geom["coordinates"]) + ")"
+        return "MULTIPOLYGON (" + ", ".join(
+            "(" + ", ".join(ring_wkt(r) for r in poly) + ")" for poly in geom["coordinates"]
+        ) + ")"
+
+    rng = random.Random(20260725)
+    fixed_basic = {  # 4타일 걸침 오목+구멍 — sqllogictest/엔진 테스트와 동일 P1
+        "type": "Polygon",
+        "coordinates": [
+            [(301203.7, 3995803.7), (304003.7, 3995803.7), (304003.7, 3998803.7),
+             (303203.7, 3998803.7), (303203.7, 3996803.7), (302203.7, 3996803.7),
+             (302203.7, 3998803.7), (301203.7, 3998803.7), (301203.7, 3995803.7)],
+            [(303403.7, 3996003.7), (303803.7, 3996003.7), (303803.7, 3996403.7),
+             (303403.7, 3996403.7), (303403.7, 3996003.7)],
+        ],
+    }
+    for name in ("basic_512x512_u16.tif", "edge_400x300_u16.tif"):
+        path = GEN / name
+        with rasterio.open(path) as ds:
+            b = ds.bounds
+            geoms = [fixed_basic] if name.startswith("basic") else []
+            for _ in range(6):
+                # 무작위 사각형 + 상단 notch — 모든 꼭짓점이 …3.7 격자 (축정렬 변만)
+                x0 = snap(rng.uniform(b.left, b.right - 700))
+                y0 = snap(rng.uniform(b.bottom, b.top - 700))
+                x1 = x0 + 10 * rng.randrange(40, 65)
+                y1 = y0 + 10 * rng.randrange(40, 65)
+                nx0 = x0 + 10 * rng.randrange(8, 16)
+                nx1 = nx0 + 10 * rng.randrange(8, 16)
+                ny = y0 + 10 * rng.randrange(8, 24)
+                ring = [(x0, y0), (x1, y0), (x1, y1), (nx1, y1), (nx1, ny),
+                        (nx0, ny), (nx0, y1), (x0, y1), (x0, y0)]
+                geoms.append({"type": "Polygon", "coordinates": [ring]})
+            a = ds.read(1).astype(np.float64)
+            for geom in geoms:
+                m = geometry_mask([geom], out_shape=(ds.height, ds.width),
+                                  transform=ds.transform, invert=True)
+                if ds.nodata is not None:
+                    m &= a != ds.nodata
+                v = a[m]
+                wkt = wkt_of(geom)
+                q = lambda stat: con.execute(
+                    f"SELECT RS_ZonalStats('{path}', '{wkt}', 1, '{stat}')"
+                ).fetchone()[0]
+                assert q("count") == v.size, f"{name} {wkt[:60]}… count 불일치"
+                if v.size:
+                    assert q("sum") == pytest.approx(v.sum())
+                    assert q("mean") == pytest.approx(v.mean())
+                    assert q("min") == v.min()
+                    assert q("max") == v.max()
+                else:
+                    assert q("mean") is None
