@@ -846,11 +846,98 @@ impl VScalar for RsBandStats {
     }
 }
 
-/// `RS_ZonalStats(path, bbox DOUBLE[], band, stat)` — bbox 영역 집계 (RFC §6.8).
-/// zone 은 geometry 가 아니라 bbox (GEOS 비링크 N4 하의 적응, 문서화 이탈).
+/// `RS_ZonalStats(path, zone, band, stat)` — zone 영역 집계 (RFC §6.8).
+/// zone 오버로드: bbox `DOUBLE[4]` 또는 WKT `VARCHAR`(POLYGON/MULTIPOLYGON, #48).
+/// 폴리곤은 순수 Rust PIP (GEOS 비링크 N4 유지) — 픽셀 중심 포함, 경계 위는 비계약.
 /// stat ∈ {count, sum, mean, min, max} (대소문자 무관). 유효 픽셀 없으면
-/// count → 0, 나머지 → NULL. NULL 인자 → NULL.
+/// count → 0, 나머지 → NULL. NULL 인자 → NULL. WKT 파싱 실패/미지원 타입 → 에러.
 struct RsZonalStats;
+
+/// stat 문자열 검증 + 소문자화 — bbox/WKT 두 경로 공용.
+fn parse_zonal_stat(raw: duckdb_string_t) -> Result<String, Box<dyn Error>> {
+    let stat = DuckString::new(&mut { raw }).as_str().to_lowercase();
+    if !matches!(stat.as_str(), "count" | "sum" | "mean" | "min" | "max") {
+        return Err(format!("RS_ZonalStats: unknown stat '{stat}' (count/sum/mean/min/max)").into());
+    }
+    Ok(stat)
+}
+
+/// 집계 결과에서 stat 하나를 뽑는다 (count/나머지 비대칭 규약 포함).
+fn zonal_stat_value(z: &engine::ZonalStats, stat: &str) -> Option<f64> {
+    match stat {
+        "count" => Some(z.count as f64),
+        "sum" => (z.count > 0).then_some(z.sum),
+        "mean" => z.mean(),
+        "min" => z.min,
+        "max" => z.max,
+        _ => unreachable!(),
+    }
+}
+
+impl RsZonalStats {
+    /// WKT VARCHAR zone 경로 (#48) — 폴리곤 파싱은 청크-로컬 dedupe
+    /// (필지 리터럴이 행마다 반복되는 워크로드 대비, 경로 캐시와 동일 패턴).
+    fn invoke_wkt(
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let paths = input.flat_vector(0);
+        // SAFETY: 컬럼 타입은 signatures() 선언(V, V, I, V)과 일치.
+        let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
+        let zonev = input.flat_vector(1);
+        let raw_zones = unsafe { zonev.as_slice_with_len::<duckdb_string_t>(n) };
+        let bandv = input.flat_vector(2);
+        let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
+        let statv = input.flat_vector(3);
+        let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
+
+        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
+        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
+        let mut zones: HashMap<String, Rc<engine::Zone>> = HashMap::new();
+        let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if paths.row_is_null(i as u64)
+                || zonev.row_is_null(i as u64)
+                || bandv.row_is_null(i as u64)
+                || statv.row_is_null(i as u64)
+            {
+                rows.push(None);
+                continue;
+            }
+            let stat = parse_zonal_stat(stats[i])?;
+            let wkt = DuckString::new(&mut { raw_zones[i] }).as_str().into_owned();
+            let zone = match zones.get(&wkt) {
+                Some(z) => Rc::clone(z),
+                None => {
+                    let z = engine::parse_zone_wkt(&wkt)
+                        .map(Rc::new)
+                        .map_err(|e| format!("RS_ZonalStats: {e}"))?;
+                    zones.insert(wkt, Rc::clone(&z));
+                    z
+                }
+            };
+            let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
+            let opened = match cache.get(&path) {
+                Some(o) => std::sync::Arc::clone(o),
+                None => {
+                    let o = open_cog_cached(&path).map_err(|e| format!("RS_ZonalStats: {e}"))?;
+                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
+                    o
+                }
+            };
+            let (meta, reader) = (&opened.0, &opened.1);
+            let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
+            let z = engine::futures::executor::block_on(
+                reader.zonal_stats_polygon(meta, &zone, band),
+            )
+            .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
+            rows.push(zonal_stat_value(&z, &stat));
+        }
+        write_values(&mut output.flat_vector(), &rows);
+        Ok(())
+    }
+}
 
 impl VScalar for RsZonalStats {
     type State = ();
@@ -860,6 +947,10 @@ impl VScalar for RsZonalStats {
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn Error>> {
+        // zone 인자 타입으로 오버로드 분기 — LIST(DOUBLE) bbox vs VARCHAR WKT (#48)
+        if input.flat_vector(1).logical_type().id() == LogicalTypeId::Varchar {
+            return Self::invoke_wkt(input, output);
+        }
         let n = input.len();
         let paths = input.flat_vector(0);
         // SAFETY: 컬럼 타입은 signatures() 선언(V, LIST(DOUBLE), I, V)과 일치.
@@ -893,13 +984,7 @@ impl VScalar for RsZonalStats {
                 rows.push(None);
                 continue;
             }
-            let stat = DuckString::new(&mut { stats[i] }).as_str().to_lowercase();
-            if !matches!(stat.as_str(), "count" | "sum" | "mean" | "min" | "max") {
-                return Err(format!(
-                    "RS_ZonalStats: unknown stat '{stat}' (count/sum/mean/min/max)"
-                )
-                .into());
-            }
+            let stat = parse_zonal_stat(stats[i])?;
             let (bo, bn) = bl.get_entry(i);
             if bn != 4 {
                 return Err(format!(
@@ -927,29 +1012,34 @@ impl VScalar for RsZonalStats {
             let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
             let z = engine::futures::executor::block_on(reader.zonal_stats(meta, bbox, band))
                 .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
-            rows.push(match stat.as_str() {
-                "count" => Some(z.count as f64),
-                "sum" => (z.count > 0).then_some(z.sum),
-                "mean" => z.mean(),
-                "min" => z.min,
-                "max" => z.max,
-                _ => unreachable!(),
-            });
+            rows.push(zonal_stat_value(&z, &stat));
         }
         write_values(&mut output.flat_vector(), &rows);
         Ok(())
     }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![
-                LogicalTypeId::Varchar.into(),
-                LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double)),
-                LogicalTypeId::Integer.into(),
-                LogicalTypeId::Varchar.into(),
-            ],
-            LogicalTypeId::Double.into(),
-        )]
+        vec![
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double)),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeId::Double.into(),
+            ),
+            // WKT polygon zone 오버로드 (#48) — bare NULL 바인딩 무해는 스파이크로 검증
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeId::Double.into(),
+            ),
+        ]
     }
 }
 

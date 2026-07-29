@@ -13,6 +13,7 @@ use crate::meta::{
     build_meta, new_metadata_fetch, read_ifds, CogMeta, Georef, LevelMeta, MetaError,
 };
 use crate::source::{ByteSource, FetchAdapter};
+use crate::zone::Zone;
 
 /// 열린 COG 핸들 — IFD 체인을 보관해 픽셀 fetch 에 재사용한다.
 ///
@@ -147,7 +148,6 @@ impl<S: ByteSource> CogReader<S> {
 
     /// bbox(닫힌 구간) 안에 **픽셀 중심**이 드는 level 0 픽셀들의 집계 (nodata 제외).
     ///
-    /// zone 은 geometry 가 아니라 bbox — GEOS 비링크(N4) 하의 §6.8 적응.
     /// 유효 픽셀 없음(교차 없음·범위 밖 밴드) → count 0 의 빈 집계.
     /// 역전·비유한 bbox → 에러, georef 없음 → 에러 (bbox 필터와 동일 규칙).
     pub async fn zonal_stats(
@@ -156,12 +156,6 @@ impl<S: ByteSource> CogReader<S> {
         bbox: [f64; 4],
         band: u32,
     ) -> Result<ZonalStats, MetaError> {
-        let empty = ZonalStats {
-            count: 0,
-            sum: 0.0,
-            min: None,
-            max: None,
-        };
         if !bbox.iter().all(|v| v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
             return Err(MetaError::InvalidFilter(format!(
                 "[{}, {}, {}, {}] must be finite with xmin<=xmax and ymin<=ymax",
@@ -171,17 +165,31 @@ impl<S: ByteSource> CogReader<S> {
         let Some(g) = &meta.georef else {
             return Err(MetaError::NotGeoreferenced);
         };
-        let (Some(l0), Some(ifd0)) = (meta.levels.first(), self.ifds.first()) else {
-            return Ok(empty);
+        let Some(l0) = meta.levels.first() else {
+            return Ok(ZonalStats::EMPTY);
         };
         if band == 0 || band > meta.num_bands {
-            return Ok(empty);
+            return Ok(ZonalStats::EMPTY);
         }
-        let Some((col_min, col_max, row_min, row_max)) = center_window(g, l0, bbox) else {
-            return Ok(empty);
+        let Some(window) = center_window(g, l0, bbox) else {
+            return Ok(ZonalStats::EMPTY);
         };
+        self.accumulate_window(meta, window, band, |_, _| true)
+            .await
+    }
 
-        // 영역이 걸치는 타일들 — 각 1회 fetch(병합)+decode 후 부분 순회
+    /// 픽셀 윈도가 걸치는 타일들을 1회 fetch(병합)+decode 해 `keep(col, row)` 를
+    /// 통과한 픽셀만 누적한다 — bbox/polygon zonal 공용 코어.
+    async fn accumulate_window(
+        &self,
+        meta: &CogMeta,
+        (col_min, col_max, row_min, row_max): (u64, u64, u64, u64),
+        band: u32,
+        keep: impl Fn(u64, u64) -> bool,
+    ) -> Result<ZonalStats, MetaError> {
+        let (Some(l0), Some(ifd0)) = (meta.levels.first(), self.ifds.first()) else {
+            return Ok(ZonalStats::EMPTY);
+        };
         let (tw, th) = (l0.tile_width as u64, l0.tile_height as u64);
         let mut tiles = Vec::new();
         for ty in (row_min / th)..=(row_max / th) {
@@ -194,7 +202,7 @@ impl<S: ByteSource> CogReader<S> {
             .await
             .map_err(|e| MetaError::Tiff(e.to_string()))?;
         let planar = ifd0.planar_configuration();
-        let mut acc = empty;
+        let mut acc = ZonalStats::EMPTY;
         for ((tx, ty), tile) in tiles.iter().zip(fetched) {
             let array = tile
                 .decode(&self.decoders)
@@ -206,6 +214,9 @@ impl<S: ByteSource> CogReader<S> {
             let c1 = col_max.min(tx0 + tw - 1) - tx0;
             for r in r0..=r1 {
                 for c in c0..=c1 {
+                    if !keep(tx0 + c, ty0 + r) {
+                        continue;
+                    }
                     let value = sample_array(
                         &array,
                         planar,
@@ -229,6 +240,42 @@ impl<S: ByteSource> CogReader<S> {
             }
         }
         Ok(acc)
+    }
+
+    /// polygon zone 안에 **픽셀 중심**이 드는 level 0 픽셀들의 집계 (#48).
+    ///
+    /// bbox zonal 과 동일 규약 (nodata 제외, count 0 빈 집계) — zone 은
+    /// envelope → [`center_window`] 로 좁힌 뒤 픽셀 중심 좌표를 PIP 로 거른다.
+    /// EMPTY·교차 없음·범위 밖 밴드 → 빈 집계. georef 없음 → 에러.
+    pub async fn zonal_stats_polygon(
+        &self,
+        meta: &CogMeta,
+        zone: &Zone,
+        band: u32,
+    ) -> Result<ZonalStats, MetaError> {
+        let Some(g) = &meta.georef else {
+            return Err(MetaError::NotGeoreferenced);
+        };
+        let Some(l0) = meta.levels.first() else {
+            return Ok(ZonalStats::EMPTY);
+        };
+        if band == 0 || band > meta.num_bands {
+            return Ok(ZonalStats::EMPTY);
+        }
+        let Some(env) = zone.envelope() else {
+            return Ok(ZonalStats::EMPTY);
+        };
+        let Some(window) = center_window(g, l0, env) else {
+            return Ok(ZonalStats::EMPTY);
+        };
+        let (ox, px) = (g.origin_x, g.pixel_x);
+        let (oy, py) = (g.origin_y, g.pixel_y);
+        self.accumulate_window(meta, window, band, |col, row| {
+            let cx = ox + (col as f64 + 0.5) * px;
+            let cy = oy - (row as f64 + 0.5) * py;
+            zone.contains(cx, cy)
+        })
+        .await
     }
 
     /// 밴드를 row-major `Vec<Option<f64>>` 로 읽는다 (RS_BandAsArray 재료).
@@ -352,6 +399,14 @@ pub struct ZonalStats {
 }
 
 impl ZonalStats {
+    /// count 0 의 빈 집계.
+    const EMPTY: ZonalStats = ZonalStats {
+        count: 0,
+        sum: 0.0,
+        min: None,
+        max: None,
+    };
+
     /// 유효 픽셀 평균 — 빈 집계면 None.
     pub fn mean(&self) -> Option<f64> {
         (self.count > 0).then(|| self.sum / self.count as f64)
