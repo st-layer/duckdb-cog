@@ -68,8 +68,10 @@ pub struct StacSearchInitData {
 ///
 /// `url` 은 search 엔드포인트 전체 (예: https://earth-search.aws.element84.com/v1/search).
 /// `page_size` 는 서버 페이지 크기 힌트(STAC body 의 `limit` — SQL 예약어라 이름을
-/// 바꿔 노출), `max_rows`(기본 1,000) 는 클라이언트 행 상한 — 도달 시 다음
-/// 페이지를 요청하지 않고 초과분을 자른다.
+/// 바꿔 노출), `max_rows` 는 클라이언트 행 상한 — 도달 시 다음 페이지를 요청하지
+/// 않고 초과분을 자른다. **명시했을 때만 절단이 허용**되며, 기본 상한(1,000)에
+/// 걸려 데이터가 남는데 자르게 되면 에러다 — 무음 절단은 데이터 손실이다
+/// (필드 리포트 2차 ①: 시즌 검색이 조용히 ~27씬으로 잘리던 사고).
 pub struct ReadStacSearchVTab;
 
 impl VTab for ReadStacSearchVTab {
@@ -112,6 +114,8 @@ impl VTab for ReadStacSearchVTab {
             .map(|v| u32::try_from(v.to_int64()))
             .transpose()
             .map_err(|_| "read_stac_search: page_size must be a positive integer")?;
+        // 명시적 max_rows 는 opt-in 절단 — 기본 상한은 도달 시 에러다 (아래)
+        let explicit_cap = named("max_rows").is_some();
         let max_rows = match named("max_rows") {
             None => 1000usize,
             Some(v) => usize::try_from(v.to_int64())
@@ -138,6 +142,18 @@ impl VTab for ReadStacSearchVTab {
             let got = page.rows.len();
             rows.extend(page.rows);
             if rows.len() >= max_rows {
+                // 잘리는 데이터가 실제로 있는가: 초과분이 이미 손에 있거나
+                // 다음 페이지가 남아 있다 (== 이고 next 없음 = 완결, 에러 아님)
+                let truncated = rows.len() > max_rows || page.next.is_some();
+                if truncated && !explicit_cap {
+                    return Err(format!(
+                        "read_stac_search: result exceeds the default row cap ({max_rows}) — \
+                         pass max_rows := N to truncate explicitly, or narrow the search \
+                         (collections/bbox/datetime). Rows count (item, asset) pairs, \
+                         not items."
+                    )
+                    .into());
+                }
                 rows.truncate(max_rows);
                 break;
             }
