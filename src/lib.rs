@@ -45,7 +45,7 @@ struct VersionInitData {
     done: AtomicBool,
 }
 
-/// `SELECT * FROM cog_version();` → 'duckdb-cog 0.1.0'
+/// `SELECT * FROM cog_version();` → 'duckdb-cog 0.2.0'
 struct VersionVTab;
 
 impl VTab for VersionVTab {
