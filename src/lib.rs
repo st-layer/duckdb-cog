@@ -158,13 +158,24 @@ struct ObjectStoreSource {
 
 /// 익스텐션 수명의 tokio 런타임 — 의도적으로 leak (unload 시 drop 하면
 /// blocking 컨텍스트 panic; DuckDB 는 사실상 프로세스 종료까지 unload 안 함).
-/// worker 1개 = 동시 원격 쿼리의 처리량 상한 — 병목 실측 후 조정 (worklog 참조).
+/// worker 수: `COG_IO_THREADS` > CPU 수(상한 8) — IO 전용(fetch future)이라
+/// 8이면 링크 포화에 충분하고, decode 는 DuckDB 호출 스레드에서 돈다.
+/// 종전 1개는 동시 원격 쿼리의 처리량 상한이었다 (필드 리포트 2차 ③).
 #[cfg(not(target_os = "emscripten"))]
 fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RT.get_or_init(|| {
+        let workers = std::env::var("COG_IO_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map_or(2, std::num::NonZeroUsize::get)
+                    .min(8)
+            });
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+            .worker_threads(workers)
             .enable_all()
             .build()
             .expect("duckdb-cog: tokio runtime init failed")
