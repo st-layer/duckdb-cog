@@ -245,6 +245,23 @@ fn remote_cache() -> &'static engine::ReaderCache {
     })
 }
 
+/// 프로세스 전역 타일 데이터 캐시 (#55). `COG_TILE_CACHE_MB` (기본 256,
+/// "0" 비활성) — decoded 타일 기준 바이트 상한이라 상주 메모리가 이 값을
+/// 넘지 않는다. 원격 리더에만 부착 (로컬 무캐시 — 현행 유지).
+#[cfg(not(target_os = "emscripten"))]
+fn tile_cache() -> Option<&'static engine::TileCache> {
+    static CACHE: std::sync::OnceLock<Option<engine::TileCache>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let mb = std::env::var("COG_TILE_CACHE_MB")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(256);
+            (mb > 0).then(|| engine::TileCache::new(mb * 1024 * 1024))
+        })
+        .as_ref()
+}
+
 /// COG 를 열어 (meta, reader) 를 얻는다 — 원격(스킴 포함)은 전역 캐시 경유,
 /// 로컬은 매번 open (동작·FD 수명 불변, #26 수용 기준). cog_io_bench 는
 /// 콜드 측정 도구라 이 경로를 쓰지 않는다.
@@ -256,9 +273,15 @@ fn open_cog_cached(path: &str) -> std::result::Result<std::sync::Arc<engine::Sha
         block_on(remote_cache().get_or_open(path, move || {
             Box::pin(async move {
                 let source = open_source(&p)?;
-                engine::open_cog(source)
+                let (meta, mut reader) = engine::open_cog(source)
                     .await
-                    .map_err(|e| format!("'{p}': {e}"))
+                    .map_err(|e| format!("'{p}': {e}"))?;
+                // 타일 데이터 캐시 (#55): 원격 리더에만 — 리더 재열림마다 새
+                // ReaderId 라서 리더 캐시 TTL 이 타일 무효화까지 겸한다.
+                if let Some(tc) = tile_cache() {
+                    reader.attach_tile_cache(tc);
+                }
+                Ok((meta, reader))
             })
         }))
     } else {
