@@ -333,3 +333,65 @@ fn gdal_metadata_statistics_are_mapped() {
     let (meta, _) = block_on(open_cog(fixture("basic_512x512_u16.tif"))).expect("valid COG");
     assert!(meta.band_stats.is_none());
 }
+
+/// #53 WKT 창: envelope 모양은 bbox 오버로드와 동일하고, 폴리곤 밖 픽셀은 None.
+/// 값 계약은 #49 의 rasterio 오라클 수치를 계승한다 — 비-None 원소의 개수·합이
+/// 같은 폴리곤의 zonal_stats_polygon 과 정확히 일치해야 한다.
+#[test]
+fn band_window_polygon_masks_outside_and_matches_zonal() {
+    use engine::parse_zone_wkt;
+    let (meta, reader) = block_on(open_cog(fixture("basic_512x512_u16.tif"))).expect("valid COG");
+    // #49 P1 과 동일: 4타일에 걸치는 오목(U-notch) + 구멍 폴리곤
+    let p1 = parse_zone_wkt(
+        "POLYGON ((301203.7 3995803.7, 304003.7 3995803.7, 304003.7 3998803.7, \
+         303203.7 3998803.7, 303203.7 3996803.7, 302203.7 3996803.7, \
+         302203.7 3998803.7, 301203.7 3998803.7, 301203.7 3995803.7), \
+         (303403.7 3996003.7, 303803.7 3996003.7, 303803.7 3996403.7, \
+         303403.7 3996403.7, 303403.7 3996003.7))",
+    )
+    .expect("valid WKT");
+    let env = [301203.7, 3995803.7, 304003.7, 3998803.7];
+
+    let win = block_on(reader.band_window_polygon(&meta, &p1, 1))
+        .expect("io ok")
+        .expect("band 1 exists");
+    let rect = block_on(reader.band_window(&meta, Some(env), 1))
+        .expect("io ok")
+        .expect("band 1 exists");
+
+    // 모양 계약: envelope 창과 같은 길이 (row-major, 자리 보존)
+    assert_eq!(win.len(), rect.len(), "WKT 창은 envelope 모양을 유지한다");
+
+    // 값 계약: 비-None 원소가 폴리곤 zonal 과 일치 (오라클 계승)
+    let z = block_on(reader.zonal_stats_polygon(&meta, &p1, 1)).expect("io ok");
+    let vals: Vec<f64> = win.iter().flatten().copied().collect();
+    assert_eq!(vals.len() as u64, z.count, "유효 픽셀 수 = zonal count");
+    assert_eq!(vals.iter().sum::<f64>(), z.sum, "유효 픽셀 합 = zonal sum");
+
+    // 변별력: envelope 는 notch·구멍까지 포함하므로 더 많다
+    assert!(
+        rect.iter().flatten().count() > vals.len(),
+        "마스킹이 실제로 픽셀을 걷어내야 한다"
+    );
+}
+
+/// EMPTY 폴리곤 → 빈 배열 (zonal 의 빈 집계와 같은 결), 범위 밖 밴드 → None.
+#[test]
+fn band_window_polygon_empty_and_bad_band() {
+    use engine::parse_zone_wkt;
+    let (meta, reader) = block_on(open_cog(fixture("basic_512x512_u16.tif"))).expect("valid COG");
+    let empty = parse_zone_wkt("POLYGON EMPTY").expect("valid WKT");
+    assert_eq!(
+        block_on(reader.band_window_polygon(&meta, &empty, 1)).expect("io ok"),
+        Some(Vec::new())
+    );
+    let p = parse_zone_wkt(
+        "POLYGON ((301203.7 3995803.7, 302203.7 3995803.7, 302203.7 3996803.7, \
+         301203.7 3996803.7, 301203.7 3995803.7))",
+    )
+    .expect("valid WKT");
+    assert_eq!(
+        block_on(reader.band_window_polygon(&meta, &p, 99)).expect("io ok"),
+        None
+    );
+}
