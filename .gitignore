@@ -11,3 +11,4 @@ docs/worklog/
 .omc/
 /test/data/generated/
 __pycache__/
+.ipynb_checkpoints/
