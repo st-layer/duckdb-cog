@@ -57,7 +57,7 @@ oracle-tested against rasterio in CI.
 | `RS_Values` batch pixel access (per-tile single fetch+decode) | ✅ |
 | `RS_NormalizedDifference` (point-form band math, NDVI-style) | ✅ |
 | `RS_ZonalStats` (bbox **or** WKT polygon zones, count/sum/mean/min/max) | ✅ |
-| `RS_BandAsArray` (full band or bbox window, row-major) | ✅ |
+| `RS_BandAsArray` (full band, bbox window, **or WKT polygon zone**, row-major) | ✅ |
 | `RS_BandStats` — GDAL_METADATA statistics without decoding | ✅ |
 | `read_stac(url)` — STAC items to (item, asset) rows incl. `raster:bands` statistics (decode-free aggregation) | ✅ |
 | `read_stac_search(url, collections/bbox/datetime/page_size, max_rows)` — STAC API POST /search with `rel=next` pagination (row cap 1,000 by default) | ✅ |
@@ -131,7 +131,8 @@ unknown.
 `RS_NormalizedDifference(path, x, y, band1, band2)` (point-form, NDVI-style) ·
 `RS_ZonalStats(path, zone, band, stat)` — zone is a bbox `DOUBLE[4]` or a WKT
 `POLYGON`/`MULTIPOLYGON` string (stat: `count`/`sum`/`mean`/`min`/`max`) ·
-`RS_BandAsArray(path, band[, bbox[]])` (row-major `DOUBLE[]`) ·
+`RS_BandAsArray(path, band[, zone])` — zone is a bbox `DOUBLE[4]` or a WKT
+polygon; row-major `DOUBLE[]` over the zone's envelope, `NULL` outside it ·
 `RS_BandStats(path[, band])` (GDAL_METADATA statistics, decode-free) ·
 `RS_WorldToRasterCoord` / `RS_RasterToWorldCoord` (1-based)
 

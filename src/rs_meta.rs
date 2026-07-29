@@ -73,6 +73,49 @@ fn write_values<T: Copy>(vector: &mut FlatVector, rows: &[Option<T>]) {
     }
 }
 
+/// 행별 `Option<Vec<Option<f64>>>` → LIST(DOUBLE) 벡터 (값 패스 → NULL 패스).
+/// 행 None = 리스트 NULL, 원소 None = 리스트 원소 NULL.
+fn write_list_rows(rows: &[Option<Vec<Option<f64>>>], output: &mut dyn WritableVector) {
+    let mut out = output.list_vector();
+    let mut offsets = Vec::with_capacity(rows.len());
+    let mut total = 0usize;
+    for row in rows {
+        offsets.push(total);
+        total += row.as_ref().map_or(0, Vec::len);
+    }
+    let mut child = out.child(total);
+    {
+        // SAFETY: 자식은 DOUBLE — f64 표현. total 로 reserve 됨.
+        let slice = unsafe { child.as_mut_slice::<f64>() };
+        for (i, row) in rows.iter().enumerate() {
+            if let Some(vals) = row {
+                for (k, v) in vals.iter().enumerate() {
+                    if let Some(x) = v {
+                        slice[offsets[i] + k] = *x;
+                    }
+                }
+            }
+        }
+    }
+    for (i, row) in rows.iter().enumerate() {
+        match row {
+            None => {
+                out.set_entry(i, offsets[i], 0);
+                out.set_null(i);
+            }
+            Some(vals) => {
+                out.set_entry(i, offsets[i], vals.len());
+                for (k, v) in vals.iter().enumerate() {
+                    if v.is_none() {
+                        child.set_null(offsets[i] + k);
+                    }
+                }
+            }
+        }
+    }
+    out.set_len(total);
+}
+
 /// CogMeta 에서 값 하나를 뽑는 함수 포인터 (행 단위, NULL = None).
 type Extract<T> = fn(&engine::CogMeta) -> Option<T>;
 
@@ -626,6 +669,66 @@ impl VScalar for RsValues {
 /// nodata → NULL 원소. 범위 밖 밴드·NULL 인자 → NULL (빈 배열과 구분).
 struct RsBandAsArray;
 
+impl RsBandAsArray {
+    /// WKT zone 오버로드 (#53) — 폴리곤 envelope 창, 중심이 밖인 픽셀은 NULL 원소.
+    /// bbox 오버로드와 같은 모양 계약이라 호출측 reshape 가 그대로 성립한다.
+    fn invoke_wkt(
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let paths = input.flat_vector(0);
+        // SAFETY: 컬럼 타입은 signatures() 선언(V, I, V)과 일치.
+        let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
+        let bandv = input.flat_vector(1);
+        let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
+        let zonev = input.flat_vector(2);
+        let raw_zones = unsafe { zonev.as_slice_with_len::<duckdb_string_t>(n) };
+
+        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
+        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
+        let mut zones: HashMap<String, Rc<engine::Zone>> = HashMap::new();
+        let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if paths.row_is_null(i as u64)
+                || bandv.row_is_null(i as u64)
+                || zonev.row_is_null(i as u64)
+            {
+                rows.push(None);
+                continue;
+            }
+            let wkt = DuckString::new(&mut { raw_zones[i] }).as_str().into_owned();
+            let zone = match zones.get(&wkt) {
+                Some(z) => Rc::clone(z),
+                None => {
+                    let z = engine::parse_zone_wkt(&wkt)
+                        .map(Rc::new)
+                        .map_err(|e| format!("RS_BandAsArray: {e}"))?;
+                    zones.insert(wkt, Rc::clone(&z));
+                    z
+                }
+            };
+            let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
+            let opened = match cache.get(&path) {
+                Some(o) => std::sync::Arc::clone(o),
+                None => {
+                    let o = open_cog_cached(&path).map_err(|e| format!("RS_BandAsArray: {e}"))?;
+                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
+                    o
+                }
+            };
+            let (meta, reader) = (&opened.0, &opened.1);
+            let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → NULL
+            let win =
+                engine::futures::executor::block_on(reader.band_window_polygon(meta, &zone, band))
+                    .map_err(|e| format!("RS_BandAsArray: '{path}': {e}"))?;
+            rows.push(win);
+        }
+        write_list_rows(&rows, output);
+        Ok(())
+    }
+}
+
 impl VScalar for RsBandAsArray {
     type State = ();
 
@@ -634,6 +737,12 @@ impl VScalar for RsBandAsArray {
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn Error>> {
+        // zone 인자 타입으로 오버로드 분기 — LIST(DOUBLE) bbox vs VARCHAR WKT (#53)
+        if input.num_columns() > 2
+            && input.flat_vector(2).logical_type().id() == LogicalTypeId::Varchar
+        {
+            return Self::invoke_wkt(input, output);
+        }
         let n = input.len();
         let paths = input.flat_vector(0);
         // SAFETY: 컬럼 타입은 signatures() 선언(V, I[, LIST(DOUBLE)])과 일치.
@@ -707,53 +816,25 @@ impl VScalar for RsBandAsArray {
             rows.push(win);
         }
 
-        // LIST(DOUBLE) 출력 — RsValues 와 동일 2패스
-        let mut out = output.list_vector();
-        let mut offsets = Vec::with_capacity(n);
-        let mut total = 0usize;
-        for row in &rows {
-            offsets.push(total);
-            total += row.as_ref().map_or(0, Vec::len);
-        }
-        let mut child = out.child(total);
-        {
-            // SAFETY: 자식은 DOUBLE — f64 표현. total 로 reserve 됨.
-            let slice = unsafe { child.as_mut_slice::<f64>() };
-            for (i, row) in rows.iter().enumerate() {
-                if let Some(vals) = row {
-                    for (k, v) in vals.iter().enumerate() {
-                        if let Some(x) = v {
-                            slice[offsets[i] + k] = *x;
-                        }
-                    }
-                }
-            }
-        }
-        for (i, row) in rows.iter().enumerate() {
-            match row {
-                None => {
-                    out.set_entry(i, offsets[i], 0);
-                    out.set_null(i);
-                }
-                Some(vals) => {
-                    out.set_entry(i, offsets[i], vals.len());
-                    for (k, v) in vals.iter().enumerate() {
-                        if v.is_none() {
-                            child.set_null(offsets[i] + k);
-                        }
-                    }
-                }
-            }
-        }
-        out.set_len(total);
+        write_list_rows(&rows, output);
         Ok(())
     }
+
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         let list_d = || LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double));
         vec![
             ScalarFunctionSignature::exact(
                 vec![LogicalTypeId::Varchar.into(), LogicalTypeId::Integer.into()],
+                list_d(),
+            ),
+            // WKT zone (#53) — bbox 오버로드와 같은 반환 계약
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
                 list_d(),
             ),
             ScalarFunctionSignature::exact(
