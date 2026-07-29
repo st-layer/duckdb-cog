@@ -17,6 +17,8 @@ mod source;
 #[cfg(feature = "reader")]
 mod stac;
 #[cfg(feature = "reader")]
+mod tile_cache;
+#[cfg(feature = "reader")]
 mod zone;
 
 #[cfg(feature = "reader")]
@@ -35,6 +37,8 @@ pub use stac::{
     apply_next, build_search_body, parse_stac, parse_stac_page, StacAssetRow, StacError, StacNext,
     StacPage,
 };
+#[cfg(feature = "reader")]
+pub use tile_cache::TileCache;
 #[cfg(feature = "reader")]
 pub use zone::{parse_zone_wkt, Zone, ZoneError};
 // STAC 검색 body 조립/전달용 (ext 가 별도 의존 없이) — bytes/futures 와 같은 이유.

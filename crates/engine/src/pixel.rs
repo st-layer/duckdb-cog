@@ -13,6 +13,7 @@ use crate::meta::{
     build_meta, new_metadata_fetch, read_ifds, CogMeta, Georef, LevelMeta, MetaError,
 };
 use crate::source::{ByteSource, FetchAdapter};
+use crate::tile_cache::{Claim, Key as TileKey, ReaderId, TileCache};
 use crate::zone::Zone;
 
 /// 열린 COG 핸들 — IFD 체인을 보관해 픽셀 fetch 에 재사용한다.
@@ -23,6 +24,9 @@ pub struct CogReader<S: ByteSource> {
     fetch: FetchAdapter<S>,
     ifds: Vec<ImageFileDirectory>,
     decoders: DecoderRegistry,
+    /// 타일 데이터 캐시 (#55) — 부착 시 fetch+decode 결과를 공유 저장소에서
+    /// 재사용한다. 로컬 경로는 미부착(현행 유지)이 관례.
+    tile_cache: Option<(TileCache, ReaderId)>,
 }
 
 /// COG 를 열어 메타데이터와 픽셀 리더를 함께 얻는다.
@@ -37,11 +41,84 @@ pub async fn open_cog<S: ByteSource>(source: S) -> Result<(CogMeta, CogReader<S>
             fetch: adapter,
             ifds,
             decoders: DecoderRegistry::default(),
+            tile_cache: None,
         },
     ))
 }
 
 impl<S: ByteSource> CogReader<S> {
+    /// 타일 캐시 부착 — 리더마다 새 [`ReaderId`] 를 발급받으므로, 리더 캐시가
+    /// 이 리더를 교체하면 여기 올린 타일들은 자동으로 도달 불가가 된다 (#55).
+    pub fn attach_tile_cache(&mut self, cache: &TileCache) {
+        self.tile_cache = Some((cache.clone(), cache.register()));
+    }
+
+    /// 유일 타일 목록을 fetch+decode 한다 (`tiles` 와 같은 순서로 반환).
+    /// 캐시 부착 시 히트는 재사용, 미스만 병합 fetch (콜드 경합은 TileCache
+    /// 의 single-flight 가 1회로 수렴). 미부착이면 현행 직행과 동일.
+    async fn fetch_decoded(
+        &self,
+        ifd0: &ImageFileDirectory,
+        tiles: &[(usize, usize)],
+    ) -> Result<Vec<Arc<Array>>, MetaError> {
+        let Some((cache, rid)) = &self.tile_cache else {
+            let fetched = ifd0
+                .fetch_tiles(tiles, &self.fetch)
+                .await
+                .map_err(|e| MetaError::Tiff(e.to_string()))?;
+            return fetched
+                .into_iter()
+                .map(|tile| {
+                    tile.decode(&self.decoders)
+                        .map(Arc::new)
+                        .map_err(|e| MetaError::Tiff(e.to_string()))
+                })
+                .collect();
+        };
+        let keys: Vec<TileKey> = tiles.iter().map(|&(x, y)| (*rid, x, y)).collect();
+        let mut out: Vec<Option<Arc<Array>>> = Vec::with_capacity(tiles.len());
+        let mut misses: Vec<usize> = Vec::new(); // tiles 인덱스
+        for claim in cache.claim(&keys) {
+            match claim {
+                Claim::Hit(arr) => out.push(Some(arr)),
+                Claim::Mine => {
+                    misses.push(out.len());
+                    out.push(None);
+                }
+            }
+        }
+        if !misses.is_empty() {
+            let miss_xy: Vec<(usize, usize)> = misses.iter().map(|&i| tiles[i]).collect();
+            let fetched = match ifd0.fetch_tiles(&miss_xy, &self.fetch).await {
+                Ok(f) => f,
+                Err(e) => {
+                    // Mine 결판 의무: 전부 회수해 대기자를 깨운다 (재시도 유도)
+                    for &i in &misses {
+                        cache.abort(keys[i]);
+                    }
+                    return Err(MetaError::Tiff(e.to_string()));
+                }
+            };
+            for (mi, tile) in fetched.into_iter().enumerate() {
+                let i = misses[mi];
+                match tile.decode(&self.decoders) {
+                    Ok(a) => {
+                        let a = Arc::new(a);
+                        cache.fulfill(keys[i], Arc::clone(&a));
+                        out[i] = Some(a);
+                    }
+                    Err(e) => {
+                        for &j in &misses[mi..] {
+                            cache.abort(keys[j]);
+                        }
+                        return Err(MetaError::Tiff(e.to_string()));
+                    }
+                }
+            }
+        }
+        Ok(out.into_iter().map(|a| a.expect("slot filled")).collect())
+    }
+
     /// level 0 월드 좌표 `(x, y)` 의 `band`(1-based) 픽셀값.
     ///
     /// NULL 규약 (RFC §6.8): extent 밖·범위 밖 밴드·nodata → `Ok(None)`.
@@ -105,16 +182,10 @@ impl<S: ByteSource> CogReader<S> {
             .collect();
         tiles.sort_unstable();
         tiles.dedup();
-        let fetched = ifd0
-            .fetch_tiles(&tiles, &self.fetch)
-            .await
-            .map_err(|e| MetaError::Tiff(e.to_string()))?;
+        let arrays = self.fetch_decoded(ifd0, &tiles).await?;
         let planar = ifd0.planar_configuration();
         let mut decoded = std::collections::HashMap::with_capacity(tiles.len());
-        for (key, tile) in tiles.iter().zip(fetched) {
-            let array = tile
-                .decode(&self.decoders)
-                .map_err(|e| MetaError::Tiff(e.to_string()))?;
+        for (key, array) in tiles.iter().zip(arrays) {
             decoded.insert(*key, array);
         }
 
@@ -197,16 +268,10 @@ impl<S: ByteSource> CogReader<S> {
                 tiles.push((tx as usize, ty as usize));
             }
         }
-        let fetched = ifd0
-            .fetch_tiles(&tiles, &self.fetch)
-            .await
-            .map_err(|e| MetaError::Tiff(e.to_string()))?;
+        let arrays = self.fetch_decoded(ifd0, &tiles).await?;
         let planar = ifd0.planar_configuration();
         let mut acc = ZonalStats::EMPTY;
-        for ((tx, ty), tile) in tiles.iter().zip(fetched) {
-            let array = tile
-                .decode(&self.decoders)
-                .map_err(|e| MetaError::Tiff(e.to_string()))?;
+        for ((tx, ty), array) in tiles.iter().zip(arrays) {
             let (tx0, ty0) = (*tx as u64 * tw, *ty as u64 * th);
             let r0 = row_min.max(ty0) - ty0;
             let r1 = row_max.min(ty0 + th - 1) - ty0;
@@ -328,15 +393,9 @@ impl<S: ByteSource> CogReader<S> {
                 tiles.push((tx as usize, ty as usize));
             }
         }
-        let fetched = ifd0
-            .fetch_tiles(&tiles, &self.fetch)
-            .await
-            .map_err(|e| MetaError::Tiff(e.to_string()))?;
+        let arrays = self.fetch_decoded(ifd0, &tiles).await?;
         let planar = ifd0.planar_configuration();
-        for ((tx, ty), tile) in tiles.iter().zip(fetched) {
-            let array = tile
-                .decode(&self.decoders)
-                .map_err(|e| MetaError::Tiff(e.to_string()))?;
+        for ((tx, ty), array) in tiles.iter().zip(arrays) {
             let (tx0, ty0) = (*tx as u64 * tw, *ty as u64 * th);
             let r0 = row_min.max(ty0) - ty0;
             let r1 = row_max.min(ty0 + th - 1) - ty0;

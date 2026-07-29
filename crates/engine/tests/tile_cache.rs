@@ -96,15 +96,16 @@ fn n_parcels_in_one_tile_cost_one_tile_fetch() {
     let (reader, meta, fetches) = open_counted(Some(&cache));
     let meta_fetches = fetches.load(Ordering::Relaxed); // open 시 메타 읽기 분
 
-    // 같은 타일 (0,0) 안의 필지 20개 (10×10px 창을 격자로 이동)
+    // 같은 타일 (0,0) 안의 필지 20개 (10×10px 창을 격자로 이동).
+    // 타일 0 의 y 범위는 row<256 ⇔ y>3997440 — 그리드 전체(최저 y 3997600)가 안에 든다.
     for i in 0..20u32 {
         let dx = f64::from(i % 5) * 300.0;
         let dy = f64::from(i / 5) * 300.0;
         let parcel = [
             300100.0 + dx,
-            3997000.0 + dy,
+            3997600.0 + dy,
             300200.0 + dx,
-            3997100.0 + dy,
+            3997700.0 + dy,
         ];
         block_on(reader.zonal_stats(&meta, parcel, 1)).expect("io ok");
     }
