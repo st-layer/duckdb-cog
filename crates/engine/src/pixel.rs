@@ -364,6 +364,56 @@ impl<S: ByteSource> CogReader<S> {
         }
         Ok(Some(out))
     }
+
+    /// 폴리곤 zone 의 **envelope 창**을 읽고, 중심이 폴리곤 밖인 픽셀은 None 으로
+    /// 가린다 (RS_BandAsArray WKT 오버로드 재료, #53).
+    ///
+    /// 모양 계약은 bbox 오버로드와 동일 — envelope 크기의 row-major 배열이라
+    /// 호출측이 reshape 할 수 있다. nodata 와 "폴리곤 밖"은 둘 다 None 이며
+    /// 구분되지 않는다 (유효값 부재라는 점에서 같다). 픽셀 **중심** 포함 규약은
+    /// [`Self::zonal_stats_polygon`] 과 공유한다 — 같은 폴리곤이면 두 함수가
+    /// 보는 픽셀 집합이 정확히 같다.
+    pub async fn band_window_polygon(
+        &self,
+        meta: &CogMeta,
+        zone: &Zone,
+        band: u32,
+    ) -> Result<Option<Vec<Option<f64>>>, MetaError> {
+        // EMPTY 폴리곤은 창이 없다 — zonal 의 빈 집계와 같은 결
+        let Some(env) = zone.envelope() else {
+            if band == 0 || band > meta.num_bands {
+                return Ok(None);
+            }
+            return Ok(Some(Vec::new()));
+        };
+        let Some(mut win) = self.band_window(meta, Some(env), band).await? else {
+            return Ok(None);
+        };
+        if win.is_empty() {
+            return Ok(Some(win));
+        }
+        // band_window 가 여기까지 왔다면 georef·level0 는 존재한다
+        let (Some(g), Some(l0)) = (&meta.georef, meta.levels.first()) else {
+            return Ok(Some(win));
+        };
+        let Some((col_min, col_max, row_min, _)) = center_window(g, l0, env) else {
+            return Ok(Some(Vec::new()));
+        };
+        let width = (col_max - col_min + 1) as usize;
+        for (i, slot) in win.iter_mut().enumerate() {
+            if slot.is_none() {
+                continue;
+            }
+            let col = col_min + (i % width) as u64;
+            let row = row_min + (i / width) as u64;
+            let cx = g.origin_x + (col as f64 + 0.5) * g.pixel_x;
+            let cy = g.origin_y - (row as f64 + 0.5) * g.pixel_y;
+            if !zone.contains(cx, cy) {
+                *slot = None;
+            }
+        }
+        Ok(Some(win))
+    }
 }
 
 /// bbox(중심 포함, 닫힌 구간) → level0 픽셀 창 (col_min, col_max, row_min, row_max).

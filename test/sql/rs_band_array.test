@@ -52,3 +52,39 @@ statement error
 SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', 1, [1.0, 0.0, 0.0, 1.0]);
 ----
 bbox
+
+# ---- WKT 폴리곤 오버로드 (#53) — envelope 창 + 중심이 폴리곤 밖이면 NULL ----
+
+# 반환 타입은 bbox 오버로드와 동일
+query T
+SELECT typeof(RS_BandAsArray('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', 2, 'POLYGON ((600312 3899672, 600320 3899672, 600320 3899678, 600328 3899678, 600328 3899688, 600312 3899688, 600312 3899672))'));
+----
+DOUBLE[]
+
+# L자(우하단 notch) 폴리곤: 같은 2x2 envelope 이지만 우하단 픽셀 중심만 밖 → NULL
+# (bbox 오버로드 [600315,3899675,600325,3899685] 는 [35.0, 29.0, 145.0, 110.0])
+query T
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/multiband_64x64_u8.tif', 2, 'POLYGON ((600312 3899672, 600320 3899672, 600320 3899678, 600328 3899678, 600328 3899688, 600312 3899688, 600312 3899672))')::VARCHAR;
+----
+[35.0, 29.0, 145.0, NULL]
+
+# 마스킹은 RS_ZonalStats 폴리곤과 같은 픽셀 집합을 본다 (중심 포함 규약 공유)
+query II
+WITH p AS (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f,
+                  'POLYGON ((301203.7 3995803.7, 302203.7 3995803.7, 302203.7 3996803.7, 301203.7 3996803.7, 301203.7 3995803.7))' AS w)
+SELECT (SELECT count(v) FROM (SELECT unnest(RS_BandAsArray(f, 1, w)) AS v FROM p)),
+       (SELECT RS_ZonalStats(f, w, 1, 'count')::BIGINT FROM p);
+----
+10000	10000
+
+# EMPTY 폴리곤 → 빈 배열
+query T
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', 1, 'POLYGON EMPTY')::VARCHAR;
+----
+[]
+
+# 잘못된 WKT·비폴리곤 타입 → 에러 (zonal 과 동일 규약)
+statement error
+SELECT RS_BandAsArray('${COG_TEST_FIXTURES}/tiny_16x16_u8.tif', 1, 'POINT (1 2)');
+----
+RS_BandAsArray
