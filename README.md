@@ -56,7 +56,7 @@ oracle-tested against rasterio in CI.
 | `RS_Value(path, x, y[, band])` pixel access (level 0, no interpolation, rasterio-verified) | ✅ |
 | `RS_Values` batch pixel access (per-tile single fetch+decode) | ✅ |
 | `RS_NormalizedDifference` (point-form band math, NDVI-style) | ✅ |
-| `RS_ZonalStats` (bbox zones, count/sum/mean/min/max) | ✅ |
+| `RS_ZonalStats` (bbox **or** WKT polygon zones, count/sum/mean/min/max) | ✅ |
 | `RS_BandAsArray` (full band or bbox window, row-major) | ✅ |
 | `RS_BandStats` — GDAL_METADATA statistics without decoding | ✅ |
 | `read_stac(url)` — STAC items to (item, asset) rows incl. `raster:bands` statistics (decode-free aggregation) | ✅ |
@@ -129,7 +129,8 @@ unknown.
 `RS_MetaData` (named STRUCT) · `RS_GeoReference` (GDAL 6-line text) ·
 `RS_Value(path, x, y[, band])` · `RS_Values(path, xs[], ys[][, band])` ·
 `RS_NormalizedDifference(path, x, y, band1, band2)` (point-form, NDVI-style) ·
-`RS_ZonalStats(path, bbox[], band, stat)` (stat: `count`/`sum`/`mean`/`min`/`max`) ·
+`RS_ZonalStats(path, zone, band, stat)` — zone is a bbox `DOUBLE[4]` or a WKT
+`POLYGON`/`MULTIPOLYGON` string (stat: `count`/`sum`/`mean`/`min`/`max`) ·
 `RS_BandAsArray(path, band[, bbox[]])` (row-major `DOUBLE[]`) ·
 `RS_BandStats(path[, band])` (GDAL_METADATA statistics, decode-free) ·
 `RS_WorldToRasterCoord` / `RS_RasterToWorldCoord` (1-based)
