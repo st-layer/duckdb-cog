@@ -2,13 +2,21 @@
 
 **GDAL-free Cloud-Optimized GeoTIFF (COG) reader for DuckDB.**
 
+[![Community Extension](https://img.shields.io/badge/DuckDB-INSTALL%20cog%20FROM%20community-informational)](https://github.com/duckdb/community-extensions/tree/main/extensions/cog)
+[![Distribution Pipeline](https://github.com/st-layer/duckdb-cog/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/st-layer/duckdb-cog/actions/workflows/MainDistributionPipeline.yml)
+[![DuckDB](https://img.shields.io/static/v1?label=duckdb&message=v1.5.5&color=blue)](https://github.com/duckdb/duckdb/releases/tag/v1.5.5)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 `duckdb-cog` exposes COG rasters as SQL tables — in place, over HTTP/S3 range
 reads, with no re-encoding, no reprojection, and no GDAL/PROJ/GEOS anywhere in
 the read path. TIFF decoding and fetching are delegated to
 [async-tiff](https://github.com/developmentseed/async-tiff); the extension adds
 the tile-table model, the SQL surface, and lazy windowed IO on top.
 
+![Reading a remote Sentinel-2 band with SQL — install, tile grid, pixel value and zonal mean, no download](docs/demo.gif)
+
 ```sql
+INSTALL cog FROM community;
 LOAD cog;
 
 -- List the tile grid of a remote COG (metadata-only range reads — a couple of
@@ -35,9 +43,9 @@ FROM (SELECT 's3://my-bucket/ortho.tif' AS f);
 
 ## Status
 
-Phase 1–2 engineering complete — metadata, pixel access, STAC (documents and
-API search) are functional and oracle-tested; release gates (naming,
-community-extensions registration) are pending.
+**v0.1.0 is published** to the DuckDB community extensions repository.
+Metadata, pixel access, and STAC (documents and API search) are functional and
+oracle-tested against rasterio in CI.
 
 | Capability | State |
 | -- | -- |
@@ -70,13 +78,23 @@ fresh connection); remote against a real Sentinel-2 B04 scene (10980²) over
 | remote cold metadata (real Sentinel-2 B04) | 0.84 s |
 | remote repeat metadata (process-wide cache) | 0.4 ms |
 
-Ingest cost is zero by design — the file is queryable in place. Cross-engine
-context (PostGIS raster, GDAL-based `raster` extension, raquet) and the I/O
-path study live in
-[`docs/benchmarks/2026-07-12-comparative.md`](docs/benchmarks/2026-07-12-comparative.md)
-and
-[`docs/benchmarks/2026-07-12-io-path-ab.md`](docs/benchmarks/2026-07-12-io-path-ab.md);
-reproduce with `scripts/bench_compare.py` and `scripts/bench_io_compare.py`.
+Ingest cost is zero by design — the file is queryable in place.
+
+Head-to-head, extracting a 12-scene zonal-mean time series with **every engine
+already set up and warm** (so the comparison is as favourable to them as it
+gets):
+
+| | cog | PostGIS | raquet | duckdb-raster |
+| -- | -- | -- | -- | -- |
+| 12-scene series | **95 ms** | 273 ms | 364 ms | 3,323 ms* |
+| setup first | **none** | 37 s import | 17 s re-encode | none |
+
+<sub>*returns fill values — parity not established, timing shown for reference only.</sub>
+
+Full methodology, parity notes, and reproduction scripts:
+[time-series](docs/benchmarks/2026-07-23-timeseries.md) ·
+[cross-engine](docs/benchmarks/2026-07-12-comparative.md) ·
+[I/O path study](docs/benchmarks/2026-07-12-io-path-ab.md).
 
 ## SQL surface
 
@@ -161,15 +179,16 @@ These are enforced by tests and hooks, not just convention (see
 
 ## Installation
 
-Once the community-extensions registration is accepted (submission pending
-review), installation is:
+Available from the DuckDB community extensions repository:
 
 ```sql
 INSTALL cog FROM community;
 LOAD cog;
 ```
 
-Until then, build locally (below) and load the unsigned binary.
+Requires **DuckDB ≥ 1.5.5** (community extensions are built per DuckDB release;
+earlier versions are not backfilled). On older DuckDB, build from source
+(below) and load the unsigned binary.
 
 ## Building
 
