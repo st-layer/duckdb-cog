@@ -155,13 +155,16 @@ AWS_SKIP_SIGNATURE=true duckdb -unsigned -c "
     'https://sentinel-cogs.s3.us-west-2.amazonaws.com/.../B04.tif' AS f);"
 ```
 
-**Remote metadata cache**: opened remote COGs (metadata/IFDs and the reader)
-are cached process-wide for 60 seconds, so repeated queries against the same
-URL skip the cold metadata round-trips. The trade-off is staleness: if the
-object changes on the server within the TTL, you keep reading the old
-metadata (tile data is still fetched per request). Tune or disable with
-`COG_REMOTE_CACHE_TTL_S` (seconds, `0` disables). Local paths are never
-cached.
+**Remote caches**: opened remote COGs (metadata/IFDs and the reader) are
+cached process-wide for 60 seconds, and **decoded tile data is cached too**
+in a byte-bounded LRU (default 256 MB, `COG_TILE_CACHE_MB`, `0` disables) —
+so many small zones over the same tiles fetch and decode each tile once
+instead of once per call. Concurrent cold reads of the same tile collapse
+into a single fetch. The trade-off is staleness: if the object changes on
+the server within the TTL you keep reading the old metadata **and the old
+pixels** — a louder failure than stale metadata, so tune
+`COG_REMOTE_CACHE_TTL_S` (seconds, `0` disables; tiles never outlive their
+reader entry) to your update cadence. Local paths are never cached.
 
 ## Design invariants
 

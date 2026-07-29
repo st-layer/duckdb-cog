@@ -101,12 +101,7 @@ fn n_parcels_in_one_tile_cost_one_tile_fetch() {
     for i in 0..20u32 {
         let dx = f64::from(i % 5) * 300.0;
         let dy = f64::from(i / 5) * 300.0;
-        let parcel = [
-            300100.0 + dx,
-            3997600.0 + dy,
-            300200.0 + dx,
-            3997700.0 + dy,
-        ];
+        let parcel = [300100.0 + dx, 3997600.0 + dy, 300200.0 + dx, 3997700.0 + dy];
         block_on(reader.zonal_stats(&meta, parcel, 1)).expect("io ok");
     }
     let tile_fetches = fetches.load(Ordering::Relaxed) - meta_fetches;
