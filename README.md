@@ -130,7 +130,10 @@ unknown.
 `RS_Value(path, x, y[, band])` · `RS_Values(path, xs[], ys[][, band])` ·
 `RS_NormalizedDifference(path, x, y, band1, band2)` (point-form, NDVI-style) ·
 `RS_ZonalStats(path, zone, band, stat)` — zone is a bbox `DOUBLE[4]` or a WKT
-`POLYGON`/`MULTIPOLYGON` string (stat: `count`/`sum`/`mean`/`min`/`max`) ·
+`POLYGON`/`MULTIPOLYGON` string (stat: `count`/`sum`/`mean`/`min`/`max`);
+pass a `VARCHAR[]` of WKT zones to get a `DOUBLE[]` back in input order — the
+batch form fetches the tile union once, amortizing per-call overhead across
+zones (use it for many-small-zones workloads like per-parcel statistics) ·
 `RS_BandAsArray(path, band[, zone])` — zone is a bbox `DOUBLE[4]` or a WKT
 polygon; row-major `DOUBLE[]` over the zone's envelope, `NULL` outside it ·
 `RS_BandStats(path[, band])` (GDAL_METADATA statistics, decode-free) ·
@@ -165,6 +168,14 @@ the server within the TTL you keep reading the old metadata **and the old
 pixels** — a louder failure than stale metadata, so tune
 `COG_REMOTE_CACHE_TTL_S` (seconds, `0` disables; tiles never outlive their
 reader entry) to your update cadence. Local paths are never cached.
+
+**Access locality matters**: group zone calls **by scene, not by zone** —
+iterating parcels × scenes in parcel order re-opens every scene's working
+set per parcel and can thrash the tile cache (a real season-scale workload
+measured 74 min parcel-ordered vs 17 min scene-ordered). Keep one scene's
+tiles within the cache budget, finish it, move on. For many small zones per
+scene, prefer the batch form `RS_ZonalStats(path, wkt_list, band, stat)` —
+one call fetches the tile union once and amortizes per-call overhead.
 
 ## Design invariants
 

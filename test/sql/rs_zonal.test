@@ -162,3 +162,48 @@ statement error
 SELECT RS_ZonalStats('${COG_TEST_FIXTURES}/basic_512x512_u16.tif', 'not wkt', 1, 'mean');
 ----
 zone
+
+# ─── 배치 zone (LIST(VARCHAR WKT) 오버로드, #60) ───
+# 스칼라 경로와 동일 수치가 입력 순서대로 — 삼각형(7267) 뒤 MULTIPOLYGON(5000)
+query T
+SELECT RS_ZonalStats(f, [
+         'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))',
+         'MULTIPOLYGON (((301003.7 3999003.7, 301503.7 3999003.7, 301503.7 3999503.7, 301003.7 3999503.7, 301003.7 3999003.7)), ((303003.7 3999003.7, 303503.7 3999003.7, 303503.7 3999503.7, 303003.7 3999503.7, 303003.7 3999003.7)))'
+       ], 1, 'count')::BIGINT[]::VARCHAR
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+[7267, 5000]
+
+# sum 도 동일 정렬, extent 밖 zone 은 자리 보존 (count 0)
+query T
+SELECT RS_ZonalStats(f, [
+         'POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))',
+         'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))'
+       ], 1, 'sum')::VARCHAR
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+[NULL, 239110784.0]
+
+# NULL 원소는 NULL 자리로 (행 전체가 죽지 않는다)
+query T
+SELECT RS_ZonalStats(f, [
+         NULL,
+         'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))'
+       ], 1, 'count')::VARCHAR
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+[NULL, 7267.0]
+
+# 배치에서도 WKT 파싱 실패는 에러 (스칼라 규약 동일)
+statement error
+SELECT RS_ZonalStats(f, ['POLYGON ((broken'], 1, 'count')
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+RS_ZonalStats
+
+# zone 리스트 인자 자체가 NULL 이면 행 NULL
+query I
+SELECT (RS_ZonalStats(f, NULL::VARCHAR[], 1, 'count') IS NULL)::INT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS f);
+----
+1

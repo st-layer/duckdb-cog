@@ -1018,6 +1018,88 @@ impl RsZonalStats {
         write_values(&mut output.flat_vector(), &rows);
         Ok(())
     }
+
+    /// LIST(WKT) 배치 오버로드 (#60): 행마다 zone 목록을 엔진 배치 한 번으로
+    /// 집계 — 타일 union 1회 fetch 로 호출당 고정비를 zone 수로 상각 (필드
+    /// 리포트 4차). 원소 규약: NULL 원소 → NULL 자리, 파싱 실패 → 에러 (스칼라
+    /// 동일), 결과는 입력 순서의 LIST(DOUBLE).
+    fn invoke_wkt_batch(
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let n = input.len();
+        let paths = input.flat_vector(0);
+        // SAFETY: 컬럼 타입은 signatures() 선언(V, LIST(VARCHAR), I, V)과 일치.
+        let raw_paths = unsafe { paths.as_slice_with_len::<duckdb_string_t>(n) };
+        let znull = input.flat_vector(1);
+        let zl = input.list_vector(1);
+        let zmax = (0..n)
+            .filter(|i| !znull.row_is_null(*i as u64))
+            .map(|i| {
+                let (o, l) = zl.get_entry(i);
+                o + l
+            })
+            .max()
+            .unwrap_or(0);
+        let zchild = zl.child(zmax);
+        let raw_zones = unsafe { zchild.as_slice_with_len::<duckdb_string_t>(zmax) };
+        let bandv = input.flat_vector(2);
+        let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
+        let statv = input.flat_vector(3);
+        let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
+
+        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
+        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
+        let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if paths.row_is_null(i as u64)
+                || znull.row_is_null(i as u64)
+                || bandv.row_is_null(i as u64)
+                || statv.row_is_null(i as u64)
+            {
+                rows.push(None);
+                continue;
+            }
+            let stat = parse_zonal_stat(stats[i])?;
+            let (off, len) = zl.get_entry(i);
+            // NULL 원소는 자리만 남기고 유효 원소만 엔진 배치로 (자리 복원용 slot)
+            let mut slot: Vec<Option<usize>> = Vec::with_capacity(len);
+            let mut zones: Vec<engine::Zone> = Vec::new();
+            for (k, raw) in raw_zones.iter().enumerate().skip(off).take(len) {
+                if zchild.row_is_null(k as u64) {
+                    slot.push(None);
+                } else {
+                    let wkt = DuckString::new(&mut { *raw }).as_str().into_owned();
+                    slot.push(Some(zones.len()));
+                    zones.push(
+                        engine::parse_zone_wkt(&wkt).map_err(|e| format!("RS_ZonalStats: {e}"))?,
+                    );
+                }
+            }
+            let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
+            let opened = match cache.get(&path) {
+                Some(o) => std::sync::Arc::clone(o),
+                None => {
+                    let o = open_cog_cached(&path).map_err(|e| format!("RS_ZonalStats: {e}"))?;
+                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
+                    o
+                }
+            };
+            let (meta, reader) = (&opened.0, &opened.1);
+            let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
+            let zs = engine::futures::executor::block_on(
+                reader.zonal_stats_polygon_batch(meta, &zones, band),
+            )
+            .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
+            rows.push(Some(
+                slot.iter()
+                    .map(|s| s.and_then(|j| zonal_stat_value(&zs[j], &stat)))
+                    .collect(),
+            ));
+        }
+        write_list_rows(&rows, output);
+        Ok(())
+    }
 }
 
 impl VScalar for RsZonalStats {
@@ -1028,9 +1110,13 @@ impl VScalar for RsZonalStats {
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn Error>> {
-        // zone 인자 타입으로 오버로드 분기 — LIST(DOUBLE) bbox vs VARCHAR WKT (#48)
+        // zone 인자 타입으로 오버로드 분기 — VARCHAR WKT (#48) / LIST(VARCHAR)
+        // 배치 (#60) / LIST(DOUBLE) bbox. 리스트 둘은 자식 타입으로 가른다.
         if input.flat_vector(1).logical_type().id() == LogicalTypeId::Varchar {
             return Self::invoke_wkt(input, output);
+        }
+        if input.list_vector(1).child(0).logical_type().id() == LogicalTypeId::Varchar {
+            return Self::invoke_wkt_batch(input, output);
         }
         let n = input.len();
         let paths = input.flat_vector(0);
@@ -1119,6 +1205,16 @@ impl VScalar for RsZonalStats {
                     LogicalTypeId::Varchar.into(),
                 ],
                 LogicalTypeId::Double.into(),
+            ),
+            // LIST(WKT) 배치 오버로드 (#60) — zone 목록을 타일 union 1회로 집계
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double)),
             ),
         ]
     }

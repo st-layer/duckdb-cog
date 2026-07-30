@@ -50,8 +50,7 @@ const P3: &str = "POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 399
 
 #[test]
 fn batch_matches_scalar_results_in_input_order() {
-    let (meta, reader) =
-        block_on(open_cog(MemorySource::new(fixture_bytes()))).expect("valid COG");
+    let (meta, reader) = block_on(open_cog(MemorySource::new(fixture_bytes()))).expect("valid COG");
     let zones: Vec<_> = [P1, P2, P3]
         .iter()
         .map(|w| parse_zone_wkt(w).expect("valid WKT"))
@@ -110,8 +109,7 @@ fn batch_fetches_the_tile_union_once_even_detached() {
 
 #[test]
 fn batch_empty_and_out_of_range_zones_yield_empty_slots() {
-    let (meta, reader) =
-        block_on(open_cog(MemorySource::new(fixture_bytes()))).expect("valid COG");
+    let (meta, reader) = block_on(open_cog(MemorySource::new(fixture_bytes()))).expect("valid COG");
     // [래스터 밖, 유효, 래스터 밖] — 자리는 보존되고 빈 슬롯은 EMPTY 집계
     let zones = vec![
         parse_zone_wkt(
@@ -143,7 +141,10 @@ fn batch_out_of_range_band_is_all_empty_and_zero_fetch() {
     let zones = vec![parse_zone_wkt(P3).expect("valid WKT")];
     let batch = block_on(reader.zonal_stats_polygon_batch(&meta, &zones, 9)).expect("io ok");
     assert_eq!(batch.len(), 1);
-    assert_eq!(batch[0].count, 0, "범위 밖 밴드 = 빈 집계 (스칼라 규약 동일)");
+    assert_eq!(
+        batch[0].count, 0,
+        "범위 밖 밴드 = 빈 집계 (스칼라 규약 동일)"
+    );
     assert_eq!(
         fetches.load(Ordering::Relaxed),
         meta_fetches,
