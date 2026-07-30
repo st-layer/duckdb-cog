@@ -60,7 +60,7 @@ oracle-tested against rasterio in CI.
 | `RS_BandAsArray` (full band, bbox window, **or WKT polygon zone**, row-major) | ✅ |
 | `RS_BandStats` — GDAL_METADATA statistics without decoding | ✅ |
 | `read_stac(url)` — STAC items to (item, asset) rows incl. `raster:bands` statistics (decode-free aggregation) | ✅ |
-| `read_stac_search(url, collections/bbox/datetime/page_size, max_rows)` — STAC API POST /search with `rel=next` pagination (row cap 1,000 by default) | ✅ |
+| `read_stac_search(url, collections/bbox/datetime/page_size, max_rows)` — STAC API POST /search with `rel=next` pagination (errors if the 1,000-row default cap would drop data; explicit `max_rows` opts into truncation) | ✅ |
 
 ## Performance
 
