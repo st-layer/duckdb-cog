@@ -56,6 +56,20 @@ struct Inner {
     max_bytes: usize,
     next_id: AtomicU64,
     state: Mutex<State>,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evictions: AtomicU64,
+}
+
+/// 캐시 카운터 스냅샷 (#61) — 스래싱 시그니처: misses·evictions 만 늘고
+/// hits 정체, bytes 가 예산에 고정.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub bytes: u64,
+    pub max_bytes: u64,
 }
 
 impl TileCache {
@@ -66,7 +80,26 @@ impl TileCache {
             max_bytes,
             next_id: AtomicU64::new(0),
             state: Mutex::new(State::default()),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }))
+    }
+
+    /// 카운터 스냅샷 — 원자 카운터라 합계가 순간적으로 어긋날 수 있는 건
+    /// 비계약 (관측 용도). bytes 는 락 하에 읽는 정확값.
+    pub fn stats(&self) -> TileCacheStats {
+        let bytes = {
+            let st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.used as u64
+        };
+        TileCacheStats {
+            hits: self.0.hits.load(Ordering::Relaxed),
+            misses: self.0.misses.load(Ordering::Relaxed),
+            evictions: self.0.evictions.load(Ordering::Relaxed),
+            bytes,
+            max_bytes: self.0.max_bytes as u64,
+        }
     }
 
     /// 리더 등록 — 호출마다 새 id. 같은 URL 이라도 재열림이면 다른 키 공간.
@@ -94,6 +127,7 @@ impl TileCache {
                 match st.map.get_mut(&key) {
                     Some(Slot::Ready { arr, last_used, .. }) => {
                         *last_used = tick;
+                        self.0.hits.fetch_add(1, Ordering::Relaxed);
                         return Claim::Hit(Arc::clone(arr));
                     }
                     Some(Slot::Pending(sig)) => Arc::clone(sig),
@@ -102,6 +136,7 @@ impl TileCache {
                             key,
                             Slot::Pending(Arc::new((Mutex::new(false), Condvar::new()))),
                         );
+                        self.0.misses.fetch_add(1, Ordering::Relaxed);
                         return Claim::Mine;
                     }
                 }
@@ -147,6 +182,7 @@ impl TileCache {
                 let Some(v) = victim else { break };
                 if let Some(Slot::Ready { bytes, .. }) = st.map.remove(&v) {
                     st.used -= bytes;
+                    self.0.evictions.fetch_add(1, Ordering::Relaxed);
                 }
             }
             match prev {
