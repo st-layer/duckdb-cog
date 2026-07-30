@@ -165,6 +165,10 @@ the server within the TTL you keep reading the old metadata **and the old
 pixels** — a louder failure than stale metadata, so tune
 `COG_REMOTE_CACHE_TTL_S` (seconds, `0` disables; tiles never outlive their
 reader entry) to your update cadence. Local paths are never cached.
+`SELECT * FROM cog_cache_stats();` exposes the tile-cache counters
+(hits/misses/evictions/bytes/max_bytes) — if misses and evictions climb
+while bytes sits pinned at `max_bytes`, your working set exceeds the budget
+and the cache is thrashing: raise `COG_TILE_CACHE_MB` or improve locality.
 
 **Remote IO concurrency**: range fetches run on a dedicated IO thread pool
 sized to your CPU count (capped at 8); set `COG_IO_THREADS` to override —

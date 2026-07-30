@@ -674,6 +674,76 @@ fn write_stac_batch(batch: &[engine::StacAssetRow], output: &mut DataChunkHandle
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
+#[repr(C)]
+struct CacheStatsBindData;
+
+#[cfg(not(target_os = "emscripten"))]
+#[repr(C)]
+struct CacheStatsInitData {
+    done: AtomicBool,
+}
+
+/// `SELECT * FROM cog_cache_stats();` — 타일 캐시 카운터 1행 (#61).
+///
+/// 카운터는 프로세스 전역 누적. 스래싱 시그니처: misses·evictions 만 늘고
+/// hits 정체 + bytes 가 max_bytes 에 고정 — 이때 `COG_TILE_CACHE_MB` 를
+/// 키우거나 접근을 scene 단위로 묶는다 (README 지역성 절).
+/// 캐시 비활성(`COG_TILE_CACHE_MB=0`)이면 전부 0 (max_bytes 0 이 비활성 표지).
+#[cfg(not(target_os = "emscripten"))]
+struct CacheStatsVTab;
+
+#[cfg(not(target_os = "emscripten"))]
+impl VTab for CacheStatsVTab {
+    type InitData = CacheStatsInitData;
+    type BindData = CacheStatsBindData;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        for name in ["hits", "misses", "evictions", "bytes", "max_bytes"] {
+            bind.add_result_column(name, LogicalTypeHandle::from(LogicalTypeId::Bigint));
+        }
+        Ok(CacheStatsBindData)
+    }
+
+    fn init(_: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        Ok(CacheStatsInitData {
+            done: AtomicBool::new(false),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        if func.get_init_data().done.swap(true, Ordering::Relaxed) {
+            output.set_len(0);
+            return Ok(());
+        }
+        let s = tile_cache()
+            .map(|c| c.stats())
+            .unwrap_or(engine::TileCacheStats {
+                hits: 0,
+                misses: 0,
+                evictions: 0,
+                bytes: 0,
+                max_bytes: 0,
+            });
+        let cols = [s.hits, s.misses, s.evictions, s.bytes, s.max_bytes];
+        for (i, v) in cols.iter().enumerate() {
+            let mut col = output.flat_vector(i);
+            // SAFETY: 컬럼은 bind() 에서 BIGINT 로 선언 — i64 표현.
+            let slice = unsafe { col.as_mut_slice::<i64>() };
+            slice[0] = i64::try_from(*v).unwrap_or(i64::MAX);
+        }
+        output.set_len(1);
+        Ok(())
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        None
+    }
+}
+
 #[duckdb_entrypoint_c_api]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<VersionVTab>("cog_version")?;
@@ -681,6 +751,7 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
     {
         con.register_table_function::<ReadCogVTab>("read_cog")?;
         con.register_table_function::<ReadStacVTab>("read_stac")?;
+        con.register_table_function::<CacheStatsVTab>("cog_cache_stats")?;
         rs_meta::register(&con)?;
         io_bench::register(&con)?;
         stac_search::register(&con)?;
