@@ -24,7 +24,8 @@ v0.1.0 등록(#2274)과 첫 배포 사고(1.5.4/1.5.5 스탬프 불일치 → CE
 같이 움직여야 하는 **5총사**: Cargo.toml `version` · `test/sql/cog_version.test`
 기대값 · git 태그 · CE `version` 필드 · CE `ref`.
 
-1. CHANGELOG 성격의 정리 (PR 본문들 요약이면 충분)
+1. **`CHANGELOG.md` 에 릴리스 항목 추가** (Keep a Changelog 형식 — PR 본문 요약,
+   Deployed 줄에 CE PR 링크) + `gh release create vX.Y.Z` 로 GitHub Release 발행
 2. `Cargo.toml` version bump + `test/sql/cog_version.test` 핀 동기 (버전 문자열이
    테스트 계약이다)
 3. 낡은 문구 점검: README 한계 절·`examples/use-cases.ipynb`·docs — 이번 릴리스가
