@@ -54,3 +54,22 @@ statement error
 SELECT * FROM read_stac_search('http://127.0.0.1:1/search');
 ----
 read_stac_search
+
+# 기본 행 상한(1,000) 도달 + 데이터가 더 남음 → 무음 절단 대신 에러
+# (필드 리포트 2차 ①: S2 시즌 검색이 조용히 ~27씬으로 잘리던 데이터 손실)
+statement error
+SELECT count(*) FROM read_stac_search('${COG_TEST_STAC_API}', collections := ['many']);
+----
+row cap
+
+# 같은 워크로드도 명시적 max_rows 는 opt-in 절단 — 에러 없이 정확히 그 수
+query I
+SELECT count(*) FROM read_stac_search('${COG_TEST_STAC_API}', collections := ['many'], max_rows := 50);
+----
+50
+
+# 명시적 max_rows 로 상한을 올리면 전량 (600×2 페이지 = 1,200행)
+query I
+SELECT count(*) FROM read_stac_search('${COG_TEST_STAC_API}', collections := ['many'], max_rows := 5000);
+----
+1200

@@ -158,13 +158,24 @@ struct ObjectStoreSource {
 
 /// 익스텐션 수명의 tokio 런타임 — 의도적으로 leak (unload 시 drop 하면
 /// blocking 컨텍스트 panic; DuckDB 는 사실상 프로세스 종료까지 unload 안 함).
-/// worker 1개 = 동시 원격 쿼리의 처리량 상한 — 병목 실측 후 조정 (worklog 참조).
+/// worker 수: `COG_IO_THREADS` > CPU 수(상한 8) — IO 전용(fetch future)이라
+/// 8이면 링크 포화에 충분하고, decode 는 DuckDB 호출 스레드에서 돈다.
+/// 종전 1개는 동시 원격 쿼리의 처리량 상한이었다 (필드 리포트 2차 ③).
 #[cfg(not(target_os = "emscripten"))]
 fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RT.get_or_init(|| {
+        let workers = std::env::var("COG_IO_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map_or(2, std::num::NonZeroUsize::get)
+                    .min(8)
+            });
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+            .worker_threads(workers)
             .enable_all()
             .build()
             .expect("duckdb-cog: tokio runtime init failed")
@@ -663,6 +674,76 @@ fn write_stac_batch(batch: &[engine::StacAssetRow], output: &mut DataChunkHandle
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
+#[repr(C)]
+struct CacheStatsBindData;
+
+#[cfg(not(target_os = "emscripten"))]
+#[repr(C)]
+struct CacheStatsInitData {
+    done: AtomicBool,
+}
+
+/// `SELECT * FROM cog_cache_stats();` — 타일 캐시 카운터 1행 (#61).
+///
+/// 카운터는 프로세스 전역 누적. 스래싱 시그니처: misses·evictions 만 늘고
+/// hits 정체 + bytes 가 max_bytes 에 고정 — 이때 `COG_TILE_CACHE_MB` 를
+/// 키우거나 접근을 scene 단위로 묶는다 (README 지역성 절).
+/// 캐시 비활성(`COG_TILE_CACHE_MB=0`)이면 전부 0 (max_bytes 0 이 비활성 표지).
+#[cfg(not(target_os = "emscripten"))]
+struct CacheStatsVTab;
+
+#[cfg(not(target_os = "emscripten"))]
+impl VTab for CacheStatsVTab {
+    type InitData = CacheStatsInitData;
+    type BindData = CacheStatsBindData;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        for name in ["hits", "misses", "evictions", "bytes", "max_bytes"] {
+            bind.add_result_column(name, LogicalTypeHandle::from(LogicalTypeId::Bigint));
+        }
+        Ok(CacheStatsBindData)
+    }
+
+    fn init(_: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        Ok(CacheStatsInitData {
+            done: AtomicBool::new(false),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        if func.get_init_data().done.swap(true, Ordering::Relaxed) {
+            output.set_len(0);
+            return Ok(());
+        }
+        let s = tile_cache()
+            .map(|c| c.stats())
+            .unwrap_or(engine::TileCacheStats {
+                hits: 0,
+                misses: 0,
+                evictions: 0,
+                bytes: 0,
+                max_bytes: 0,
+            });
+        let cols = [s.hits, s.misses, s.evictions, s.bytes, s.max_bytes];
+        for (i, v) in cols.iter().enumerate() {
+            let mut col = output.flat_vector(i);
+            // SAFETY: 컬럼은 bind() 에서 BIGINT 로 선언 — i64 표현.
+            let slice = unsafe { col.as_mut_slice::<i64>() };
+            slice[0] = i64::try_from(*v).unwrap_or(i64::MAX);
+        }
+        output.set_len(1);
+        Ok(())
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        None
+    }
+}
+
 #[duckdb_entrypoint_c_api]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<VersionVTab>("cog_version")?;
@@ -670,6 +751,7 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
     {
         con.register_table_function::<ReadCogVTab>("read_cog")?;
         con.register_table_function::<ReadStacVTab>("read_stac")?;
+        con.register_table_function::<CacheStatsVTab>("cog_cache_stats")?;
         rs_meta::register(&con)?;
         io_bench::register(&con)?;
         stac_search::register(&con)?;

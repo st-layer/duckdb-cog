@@ -38,7 +38,7 @@ pub use stac::{
     StacPage,
 };
 #[cfg(feature = "reader")]
-pub use tile_cache::TileCache;
+pub use tile_cache::{TileCache, TileCacheStats};
 #[cfg(feature = "reader")]
 pub use zone::{parse_zone_wkt, Zone, ZoneError};
 // STAC 검색 body 조립/전달용 (ext 가 별도 의존 없이) — bytes/futures 와 같은 이유.

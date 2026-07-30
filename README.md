@@ -60,7 +60,7 @@ oracle-tested against rasterio in CI.
 | `RS_BandAsArray` (full band, bbox window, **or WKT polygon zone**, row-major) | ✅ |
 | `RS_BandStats` — GDAL_METADATA statistics without decoding | ✅ |
 | `read_stac(url)` — STAC items to (item, asset) rows incl. `raster:bands` statistics (decode-free aggregation) | ✅ |
-| `read_stac_search(url, collections/bbox/datetime/page_size, max_rows)` — STAC API POST /search with `rel=next` pagination (row cap 1,000 by default) | ✅ |
+| `read_stac_search(url, collections/bbox/datetime/page_size, max_rows)` — STAC API POST /search with `rel=next` pagination (errors if the 1,000-row default cap would drop data; explicit `max_rows` opts into truncation) | ✅ |
 
 ## Performance
 
@@ -168,6 +168,14 @@ the server within the TTL you keep reading the old metadata **and the old
 pixels** — a louder failure than stale metadata, so tune
 `COG_REMOTE_CACHE_TTL_S` (seconds, `0` disables; tiles never outlive their
 reader entry) to your update cadence. Local paths are never cached.
+`SELECT * FROM cog_cache_stats();` exposes the tile-cache counters
+(hits/misses/evictions/bytes/max_bytes) — if misses and evictions climb
+while bytes sits pinned at `max_bytes`, your working set exceeds the budget
+and the cache is thrashing: raise `COG_TILE_CACHE_MB` or improve locality.
+
+**Remote IO concurrency**: range fetches run on a dedicated IO thread pool
+sized to your CPU count (capped at 8); set `COG_IO_THREADS` to override —
+e.g. raise it on fat links with many concurrent remote queries.
 
 **Access locality matters**: group zone calls **by scene, not by zone** —
 iterating parcels × scenes in parcel order re-opens every scene's working

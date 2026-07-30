@@ -1,0 +1,20 @@
+# name: test/sql/cache_stats.test
+# description: cog_cache_stats() — 타일 캐시 관측 (이슈 #61). 카운터는 프로세스
+#   전역이라 절대값은 비계약 — 스키마와 불변식(bytes ≤ max_bytes 등)만 계약.
+# group: [cog]
+
+require cog
+
+# 항상 정확히 1행
+query I
+SELECT count(*) FROM cog_cache_stats();
+----
+1
+
+# 스키마: 5개 BIGINT 카운터, 음수 없음, 상주 바이트는 예산 이하
+query IIIII
+SELECT (hits >= 0)::INT, (misses >= 0)::INT, (evictions >= 0)::INT,
+       (bytes >= 0 AND bytes <= max_bytes)::INT, (max_bytes >= 0)::INT
+FROM cog_cache_stats();
+----
+1	1	1	1	1

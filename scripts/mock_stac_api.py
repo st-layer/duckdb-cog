@@ -25,6 +25,26 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(n) or b"{}")
         if body.get("collections") == ["empty"]:
             doc = {"type": "FeatureCollection", "features": []}
+        elif body.get("collections") == ["many"]:
+            # 합성 대용량: 600행 × 2페이지 = 1,200행 — 클라이언트 기본 행 상한
+            # (1,000) 초과를 유도하는 무음-절단 계약(필드 리포트 2차 ①) 검증용
+            page = 2 if "token" in body else 1
+            doc = {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": f"many-{page}-{i:03d}",
+                        "assets": {"B04": {"href": f"https://example.com/many-{page}-{i:03d}.tif"}},
+                    }
+                    for i in range(600)
+                ],
+            }
+            if page == 1:
+                doc["links"] = [{
+                    "rel": "next", "href": "{BASE}/search",
+                    "method": "POST", "merge": True, "body": {"token": "page:2"},
+                }]
         else:
             name = "search_page2.json" if "token" in body else "search_page1.json"
             with open(f"{DATA}/{name}") as f:
