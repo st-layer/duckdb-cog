@@ -166,6 +166,10 @@ pixels** — a louder failure than stale metadata, so tune
 `COG_REMOTE_CACHE_TTL_S` (seconds, `0` disables; tiles never outlive their
 reader entry) to your update cadence. Local paths are never cached.
 
+**Remote IO concurrency**: range fetches run on a dedicated IO thread pool
+sized to your CPU count (capped at 8); set `COG_IO_THREADS` to override —
+e.g. raise it on fat links with many concurrent remote queries.
+
 ## Design invariants
 
 These are enforced by tests and hooks, not just convention (see
