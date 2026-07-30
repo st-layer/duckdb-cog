@@ -43,8 +43,9 @@ FROM (SELECT 's3://my-bucket/ortho.tif' AS f);
 
 ## Status
 
-**v0.1.0 is published** to the DuckDB community extensions repository.
-Metadata, pixel access, and STAC (documents and API search) are functional and
+**v0.3.0 is published** to the DuckDB community extensions repository.
+Metadata, pixel access, polygon zonal statistics (scalar and batch), remote
+tile caching, and STAC (documents and API search) are functional and
 oracle-tested against rasterio in CI.
 
 | Capability | State |
@@ -56,7 +57,8 @@ oracle-tested against rasterio in CI.
 | `RS_Value(path, x, y[, band])` pixel access (level 0, no interpolation, rasterio-verified) | ✅ |
 | `RS_Values` batch pixel access (per-tile single fetch+decode) | ✅ |
 | `RS_NormalizedDifference` (point-form band math, NDVI-style) | ✅ |
-| `RS_ZonalStats` (bbox **or** WKT polygon zones, count/sum/mean/min/max) | ✅ |
+| `RS_ZonalStats` (bbox **or** WKT polygon zones, count/sum/mean/min/max; batch `VARCHAR[]` overload fetches the tile union once) | ✅ |
+| Process-wide remote caches (reader + decoded tiles, single-flight) with `cog_cache_stats()` observability | ✅ |
 | `RS_BandAsArray` (full band, bbox window, **or WKT polygon zone**, row-major) | ✅ |
 | `RS_BandStats` — GDAL_METADATA statistics without decoding | ✅ |
 | `read_stac(url)` — STAC items to (item, asset) rows incl. `raster:bands` statistics (decode-free aggregation) | ✅ |
