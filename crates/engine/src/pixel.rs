@@ -273,38 +273,93 @@ impl<S: ByteSource> CogReader<S> {
         let mut acc = ZonalStats::EMPTY;
         for ((tx, ty), array) in tiles.iter().zip(arrays) {
             let (tx0, ty0) = (*tx as u64 * tw, *ty as u64 * th);
-            let r0 = row_min.max(ty0) - ty0;
-            let r1 = row_max.min(ty0 + th - 1) - ty0;
-            let c0 = col_min.max(tx0) - tx0;
-            let c1 = col_max.min(tx0 + tw - 1) - tx0;
-            for r in r0..=r1 {
-                for c in c0..=c1 {
-                    if !keep(tx0 + c, ty0 + r) {
-                        continue;
-                    }
-                    let value = sample_array(
-                        &array,
-                        planar,
-                        r as usize,
-                        c as usize,
-                        (band - 1) as usize,
-                    )
-                    .ok_or_else(|| {
-                        MetaError::Tiff(format!(
-                            "decoded tile shape {:?} does not contain pixel (row {r}, col {c}, band {band})",
-                            array.shape(),
-                        ))
-                    })?;
-                    if let Some(v) = apply_nodata(value, meta.nodata) {
-                        acc.count += 1;
-                        acc.sum += v;
-                        acc.min = Some(acc.min.map_or(v, |m: f64| m.min(v)));
-                        acc.max = Some(acc.max.map_or(v, |m: f64| m.max(v)));
-                    }
+            accumulate_tile(
+                &mut acc,
+                &array,
+                planar,
+                (col_min, col_max, row_min, row_max),
+                (tx0, ty0),
+                (tw, th),
+                band,
+                meta.nodata,
+                &keep,
+            )?;
+        }
+        Ok(acc)
+    }
+
+    /// N개 zone 을 타일 union **1회 fetch** 로 집계한다 (#60, 배치 zonal).
+    ///
+    /// zone 별 규약은 스칼라 [`Self::zonal_stats_polygon`] 와 동일 (빈 교차·
+    /// 범위 밖 밴드 → 빈 집계, georef 없음 → 에러). 결과는 입력 순서 정렬.
+    /// "아주 작은 zone 을 아주 많이" 부르는 필지 워크로드에서 호출당 고정비
+    /// (fetch·decode·클레임)를 zone 수로 상각한다 — 필드 리포트 4차.
+    pub async fn zonal_stats_polygon_batch(
+        &self,
+        meta: &CogMeta,
+        zones: &[Zone],
+        band: u32,
+    ) -> Result<Vec<ZonalStats>, MetaError> {
+        let Some(g) = &meta.georef else {
+            return Err(MetaError::NotGeoreferenced);
+        };
+        let (Some(l0), Some(ifd0)) = (meta.levels.first(), self.ifds.first()) else {
+            return Ok(vec![ZonalStats::EMPTY; zones.len()]);
+        };
+        if band == 0 || band > meta.num_bands {
+            return Ok(vec![ZonalStats::EMPTY; zones.len()]);
+        }
+        let windows: Vec<Option<(u64, u64, u64, u64)>> = zones
+            .iter()
+            .map(|z| z.envelope().and_then(|e| center_window(g, l0, e)))
+            .collect();
+        let (tw, th) = (l0.tile_width as u64, l0.tile_height as u64);
+        let mut tile_set = std::collections::BTreeSet::new();
+        for &(col_min, col_max, row_min, row_max) in windows.iter().flatten() {
+            for ty in (row_min / th)..=(row_max / th) {
+                for tx in (col_min / tw)..=(col_max / tw) {
+                    tile_set.insert((tx as usize, ty as usize));
                 }
             }
         }
-        Ok(acc)
+        let tiles: Vec<(usize, usize)> = tile_set.into_iter().collect();
+        let arrays = self.fetch_decoded(ifd0, &tiles).await?;
+        let by_tile: std::collections::HashMap<(usize, usize), std::sync::Arc<Array>> =
+            tiles.into_iter().zip(arrays).collect();
+        let planar = ifd0.planar_configuration();
+        let (ox, px) = (g.origin_x, g.pixel_x);
+        let (oy, py) = (g.origin_y, g.pixel_y);
+        let mut out = Vec::with_capacity(zones.len());
+        for (zone, window) in zones.iter().zip(&windows) {
+            let Some((col_min, col_max, row_min, row_max)) = *window else {
+                out.push(ZonalStats::EMPTY);
+                continue;
+            };
+            let keep = |col: u64, row: u64| {
+                let cx = ox + (col as f64 + 0.5) * px;
+                let cy = oy - (row as f64 + 0.5) * py;
+                zone.contains(cx, cy)
+            };
+            let mut acc = ZonalStats::EMPTY;
+            for ty in (row_min / th)..=(row_max / th) {
+                for tx in (col_min / tw)..=(col_max / tw) {
+                    let array = &by_tile[&(tx as usize, ty as usize)];
+                    accumulate_tile(
+                        &mut acc,
+                        array,
+                        planar,
+                        (col_min, col_max, row_min, row_max),
+                        (tx * tw, ty * th),
+                        (tw, th),
+                        band,
+                        meta.nodata,
+                        &keep,
+                    )?;
+                }
+            }
+            out.push(acc);
+        }
+        Ok(out)
     }
 
     /// polygon zone 안에 **픽셀 중심**이 드는 level 0 픽셀들의 집계 (#48).
@@ -524,6 +579,47 @@ impl ZonalStats {
 
 /// 디코드된 타일 배열에서 한 픽셀을 읽는다.
 ///
+/// 한 타일 안에서 창 ∩ 타일 교차 픽셀을 `keep` 필터로 누적한다 —
+/// bbox/polygon/배치 zonal 공용 코어 (fetch 는 호출측 소관).
+#[allow(clippy::too_many_arguments)]
+fn accumulate_tile(
+    acc: &mut ZonalStats,
+    array: &Array,
+    planar: PlanarConfiguration,
+    (col_min, col_max, row_min, row_max): (u64, u64, u64, u64),
+    (tx0, ty0): (u64, u64),
+    (tw, th): (u64, u64),
+    band: u32,
+    nodata: Option<f64>,
+    keep: &impl Fn(u64, u64) -> bool,
+) -> Result<(), MetaError> {
+    let r0 = row_min.max(ty0) - ty0;
+    let r1 = row_max.min(ty0 + th - 1) - ty0;
+    let c0 = col_min.max(tx0) - tx0;
+    let c1 = col_max.min(tx0 + tw - 1) - tx0;
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            if !keep(tx0 + c, ty0 + r) {
+                continue;
+            }
+            let value = sample_array(array, planar, r as usize, c as usize, (band - 1) as usize)
+                .ok_or_else(|| {
+                    MetaError::Tiff(format!(
+                        "decoded tile shape {:?} does not contain pixel (row {r}, col {c}, band {band})",
+                        array.shape(),
+                    ))
+                })?;
+            if let Some(v) = apply_nodata(value, nodata) {
+                acc.count += 1;
+                acc.sum += v;
+                acc.min = Some(acc.min.map_or(v, |m: f64| m.min(v)));
+                acc.max = Some(acc.max.map_or(v, |m: f64| m.max(v)));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// shape 해석은 PlanarConfiguration 에 따른다 (async-tiff 문서):
 /// chunky = (height, width, bands), planar = (bands, height, width).
 fn sample_array(
