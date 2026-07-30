@@ -41,8 +41,13 @@ impl ByteSource for CountingSource {
 }
 
 fn fixture_bytes() -> Vec<u8> {
+    fixture_bytes_named("basic_512x512_u16.tif")
+}
+
+fn fixture_bytes_named(name: &str) -> Vec<u8> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test/data/generated/basic_512x512_u16.tif");
+        .join("../../test/data/generated")
+        .join(name);
     std::fs::read(&path)
         .unwrap_or_else(|_| panic!("픽스처 없음: {} — `just fixtures` 로 생성", path.display()))
 }
@@ -151,6 +156,43 @@ fn readers_do_not_cross_serve() {
     assert!(
         fb.load(Ordering::Relaxed) > b_before,
         "리더 격리: 같은 캐시라도 ReaderId 가 다르면 교차 서빙 금지 (재열림 무효화의 근거)"
+    );
+}
+
+/// 다중밴드 (multiband_64x64_u8, 3밴드): 타일 fetch 는 밴드 무관 — decoded
+/// Array 가 전 밴드를 담으므로 밴드 1로 오른 타일이 밴드 2·3 을 fetch 0 으로
+/// 서빙한다. 값은 캐시 미부착 리더(현행 경로) 및 오라클 준거(pixel_value.rs)와
+/// 동일해야 한다 — 캐시가 밴드 선택(sample_array)의 상류라는 사실의 계약화.
+#[test]
+fn multiband_other_bands_hit_the_same_cached_tile() {
+    let raw = fixture_bytes_named("multiband_64x64_u8.tif");
+    let cache = TileCache::new(64 * 1024 * 1024);
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let source = CountingSource::new(raw.clone(), Arc::clone(&fetches));
+    let (meta, mut reader) = block_on(open_cog(source)).expect("valid COG");
+    reader.attach_tile_cache(&cache);
+
+    let px = |b: u32| block_on(reader.read_pixel(&meta, 600325.0, 3899675.0, b)).expect("io ok");
+    let v1 = px(1);
+    let after_first = fetches.load(Ordering::Relaxed);
+    let (v2, v3) = (px(2), px(3));
+    assert_eq!(
+        fetches.load(Ordering::Relaxed),
+        after_first,
+        "같은 타일의 다른 밴드 = 추가 fetch 0 (키에 밴드가 없는 이유)"
+    );
+
+    let (dm, detached) = block_on(open_cog(MemorySource::new(raw))).expect("valid COG");
+    let dpx = |b: u32| block_on(detached.read_pixel(&dm, 600325.0, 3899675.0, b)).expect("io ok");
+    assert_eq!(
+        (v1, v2, v3),
+        (dpx(1), dpx(2), dpx(3)),
+        "미부착 리더와 비트 동일"
+    );
+    assert_eq!(
+        (v1, v2, v3),
+        (Some(191.0), Some(110.0), Some(51.0)),
+        "오라클 준거 값 (pixel_value.rs 와 동일)"
     );
 }
 
