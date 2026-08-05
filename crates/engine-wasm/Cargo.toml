@@ -15,6 +15,8 @@ engine = { path = "../engine" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+# fetch 경로 (#66 슬라이스 2) — Request/Response + Range 헤더
+web-sys = { version = "0.3", features = ["Headers", "Request", "Response", "Window"] }
 # 패닉 메시지를 브라우저 console 로 — 사이드카 디버깅 필수품
 console_error_panic_hook = "0.1"
 

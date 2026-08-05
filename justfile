@@ -93,6 +93,20 @@ wasm-test: fixtures
         export AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar
     fi
     command -v wasm-pack >/dev/null || { echo "wasm-pack 없음 — brew install wasm-pack" >&2; exit 1; }
+    # fetch 경로 테스트용 Range+CORS 서버 — tests/web_fetch.rs 의 포트 계약(18925)
+    port=18925
+    (exec uv run python scripts/range_cors_server.py "$port" test/data/generated) >/tmp/cog-wasm-range.log 2>&1 &
+    srv=$!
+    trap 'pkill -P "$srv" 2>/dev/null || true; kill "$srv" 2>/dev/null || true' EXIT
+    ready=0
+    for _ in $(seq 50); do
+        curl -sf -o /dev/null "http://127.0.0.1:$port/" && ready=1 && break
+        sleep 0.1
+    done
+    if [ "$ready" != 1 ]; then
+        echo "FAIL: range+CORS 서버가 안 뜸 (:$port — 포트 점유? /tmp/cog-wasm-range.log 확인)" >&2
+        exit 1
+    fi
     wasm-pack test --headless --chrome crates/engine-wasm
 
 # 결정적 픽스처 생성 (seed 고정 — 해시가 tests/oracle/fixtures.lock 과 일치해야 함)
