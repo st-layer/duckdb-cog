@@ -15,6 +15,11 @@ const FIXTURE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../test/data/generated/basic_512x512_u16.tif"
 ));
+/// STATISTICS_* 태그 재료 (§6.7) — band_stats 패리티 판정용.
+const STATS_FIXTURE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../test/data/generated/stats_64x64_u16.tif"
+));
 
 /// zonal_batch.rs 오라클 폴리곤 3본 (P1 오목+구멍 / P2 MULTIPOLYGON / P3 삼각형).
 const P1: &str = "POLYGON ((301203.7 3995803.7, 304003.7 3995803.7, 304003.7 3998803.7, \
@@ -117,10 +122,27 @@ async fn cog_meta_matches_fixture() {
     assert_eq!(lget("tileWidth").as_f64(), Some(256.0));
     assert_eq!(lget("tileHeight").as_f64(), Some(256.0));
 
-    // 통계 메타데이터 존재 + 숫자 필드 (값 자체는 seed 산물 — 존재만 판정)
-    let bands = js_sys::Array::from(&get("bandStats"));
+    // basic 픽스처는 STATISTICS_* 태그가 없다 → null (pixel_value.rs 계약과 동일)
+    assert!(get("bandStats").is_null());
+}
+
+#[wasm_bindgen_test]
+async fn band_stats_match_native_goldens() {
+    // pixel_value.rs::gdal_metadata_statistics_are_mapped 와 동일 상수 (bit-exact)
+    let meta = JsFuture::from(cog_meta_from_bytes(js_sys::Uint8Array::from(STATS_FIXTURE)))
+        .await
+        .expect("resolve");
+    let bands =
+        js_sys::Array::from(&js_sys::Reflect::get(&meta, &JsValue::from_str("bandStats")).unwrap());
     assert_eq!(bands.length(), 1);
     let b0 = bands.get(0);
-    let min = js_sys::Reflect::get(&b0, &JsValue::from_str("min")).unwrap();
-    assert!(min.as_f64().is_some());
+    let get = |k: &str| {
+        js_sys::Reflect::get(&b0, &JsValue::from_str(k))
+            .unwrap()
+            .as_f64()
+    };
+    assert_eq!(get("min"), Some(33.0));
+    assert_eq!(get("max"), Some(65_477.0));
+    assert_eq!(get("mean"), Some(32_939.121_338));
+    assert_eq!(get("stddev"), Some(18_924.488_017));
 }
