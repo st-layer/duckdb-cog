@@ -68,7 +68,8 @@ ext-test: ext fixtures
     # 빌드 산출물이 필요해 check 의 oracle 과 분리 (COG_EXT_BINARY 로 활성화)
     COG_EXT_BINARY=build/debug/cog.duckdb_extension uv run pytest tests/oracle/test_rs_value_oracle.py -x -q
 
-# 엔진 wasm32-unknown-unknown 컴파일 판정 (RFC G8) — rustup 환경 필요, CI 상시 실행.
+# 엔진+사이드카 wasm32-unknown-unknown 컴파일 판정 (RFC G8, #66) — rustup 환경
+# 필요, CI 상시 실행.
 # macOS: Apple clang 은 wasm 타깃 미지원(zstd-sys C 빌드) — homebrew llvm 이 있으면 사용.
 wasm-check:
     #!/usr/bin/env bash
@@ -77,7 +78,22 @@ wasm-check:
         export CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang
         export AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar
     fi
-    cargo check -p engine --target wasm32-unknown-unknown
+    cargo check -p engine -p engine-wasm --target wasm32-unknown-unknown
+
+# 사이드카 패리티 판정 (#66) — engine-wasm 을 헤드리스 Chrome 에서 실행해
+# 네이티브 테스트와 동일 골든 상수로 비교. 픽스처는 include_bytes! 라 fixtures 선행.
+# 함정: wasm-pack 은 CHROMEDRIVER env 를 무시하고 자체 캐시 드라이버를 받는다 —
+# 로컬 Chrome 과 major 가 어긋나면 ~/Library/Caches/.wasm-pack/chromedriver-*/ 의
+# 바이너리를 맞는 버전으로 교체 (rm 후 cp — 제자리 덮어쓰기는 macOS 가 SIGKILL).
+wasm-test: fixtures
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+        export CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang
+        export AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar
+    fi
+    command -v wasm-pack >/dev/null || { echo "wasm-pack 없음 — brew install wasm-pack" >&2; exit 1; }
+    wasm-pack test --headless --chrome crates/engine-wasm
 
 # 결정적 픽스처 생성 (seed 고정 — 해시가 tests/oracle/fixtures.lock 과 일치해야 함)
 fixtures:

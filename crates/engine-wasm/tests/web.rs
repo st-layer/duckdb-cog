@@ -97,7 +97,7 @@ async fn unknown_stat_and_bad_wkt_reject() {
 #[wasm_bindgen_test]
 async fn cog_meta_matches_fixture() {
     // gen_fixtures.py basic_512x512_u16: EPSG:32652, 10m, origin (300000, 4000000),
-    // nodata 0, 타일 256, 1밴드 (통계 메타데이터 포함)
+    // nodata 0, 타일 256, 1밴드
     let meta = JsFuture::from(cog_meta_from_bytes(fixture()))
         .await
         .expect("resolve");

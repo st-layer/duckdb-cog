@@ -30,6 +30,24 @@ jobs:
       # RFC G8: engine 은 wasm32-unknown-unknown 컴파일 가능 상태 유지
       - run: just wasm-check
 
+  # 사이드카 패리티 (#66) — engine-wasm 헤드리스 Chrome 테스트. ubuntu 러너는
+  # Chrome 이 PATH 에 있어 wasm-pack 의 chromedriver 버전 감지가 정상 동작한다.
+  wasm:
+    name: just wasm-test (headless chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - uses: astral-sh/setup-uv@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: just wasm-test
+
   # 픽스처 의존 sqllogictest — 배포 파이프라인엔 픽스처가 없어(require-env 스킵)
   # PR 게이트에서 E2E 를 돌린다
   e2e:
