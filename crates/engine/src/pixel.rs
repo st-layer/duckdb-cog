@@ -575,6 +575,45 @@ impl ZonalStats {
     pub fn mean(&self) -> Option<f64> {
         (self.count > 0).then(|| self.sum / self.count as f64)
     }
+
+    /// stat 하나를 뽑는다 — count/나머지 비대칭 규약 (빈 집계: count → 0,
+    /// 나머지 → None). 네이티브 RS_ZonalStats 와 wasm 사이드카(#66) 공용 (G11).
+    pub fn value(&self, stat: ZonalStat) -> Option<f64> {
+        match stat {
+            ZonalStat::Count => Some(self.count as f64),
+            ZonalStat::Sum => (self.count > 0).then_some(self.sum),
+            ZonalStat::Mean => self.mean(),
+            ZonalStat::Min => self.min,
+            ZonalStat::Max => self.max,
+        }
+    }
+}
+
+/// RS_ZonalStats 의 stat 인자 — 이름 매핑의 단일 소스 (Sedona 의미론, G11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZonalStat {
+    Count,
+    Sum,
+    Mean,
+    Min,
+    Max,
+}
+
+impl std::str::FromStr for ZonalStat {
+    type Err = String;
+
+    /// 대소문자 무관. 미지원 이름은 소문자화해 지원 목록과 함께 보고한다
+    /// (RS_ZonalStats 에러 메시지 계약과 동일 문면).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "count" => Ok(Self::Count),
+            "sum" => Ok(Self::Sum),
+            "mean" => Ok(Self::Mean),
+            "min" => Ok(Self::Min),
+            "max" => Ok(Self::Max),
+            other => Err(format!("unknown stat '{other}' (count/sum/mean/min/max)")),
+        }
+    }
 }
 
 /// 디코드된 타일 배열에서 한 픽셀을 읽는다.
