@@ -1,0 +1,22 @@
+[package]
+name = "engine-wasm"       # 임시명 — engine 과 함께 R6(네이밍)에서 확정
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+
+[lib]
+# cdylib = wasm-pack 산출물, rlib = wasm-bindgen-test 테스트 크레이트 링크용
+crate-type = ["cdylib", "rlib"]
+
+# 의존성 전부 wasm 전용 — 네이티브 워크스페이스 빌드(just check)에서는 빈
+# 크레이트가 되어 판정 무영향. 실제 판정은 just wasm-check / wasm-test.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+engine = { path = "../engine" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# 패닉 메시지를 브라우저 console 로 — 사이드카 디버깅 필수품
+console_error_panic_hook = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
