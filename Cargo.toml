@@ -43,4 +43,4 @@ engine = { path = "crates/engine", default-features = false }
 
 [workspace]
 resolver = "2"
-members = ["crates/engine"]
+members = ["crates/engine", "crates/engine-wasm"]

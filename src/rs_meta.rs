@@ -934,25 +934,13 @@ impl VScalar for RsBandStats {
 /// count → 0, 나머지 → NULL. NULL 인자 → NULL. WKT 파싱 실패/미지원 타입 → 에러.
 struct RsZonalStats;
 
-/// stat 문자열 검증 + 소문자화 — bbox/WKT 두 경로 공용.
-fn parse_zonal_stat(raw: duckdb_string_t) -> Result<String, Box<dyn Error>> {
-    let stat = DuckString::new(&mut { raw }).as_str().to_lowercase();
-    if !matches!(stat.as_str(), "count" | "sum" | "mean" | "min" | "max") {
-        return Err(format!("RS_ZonalStats: unknown stat '{stat}' (count/sum/mean/min/max)").into());
-    }
-    Ok(stat)
-}
-
-/// 집계 결과에서 stat 하나를 뽑는다 (count/나머지 비대칭 규약 포함).
-fn zonal_stat_value(z: &engine::ZonalStats, stat: &str) -> Option<f64> {
-    match stat {
-        "count" => Some(z.count as f64),
-        "sum" => (z.count > 0).then_some(z.sum),
-        "mean" => z.mean(),
-        "min" => z.min,
-        "max" => z.max,
-        _ => unreachable!(),
-    }
+/// stat 문자열 검증 — bbox/WKT 두 경로 공용. 이름 매핑과 값 추출은
+/// engine(`ZonalStat`/`ZonalStats::value`)이 단일 소스 (wasm 사이드카 공유, #66).
+fn parse_zonal_stat(raw: duckdb_string_t) -> Result<engine::ZonalStat, Box<dyn Error>> {
+    DuckString::new(&mut { raw })
+        .as_str()
+        .parse::<engine::ZonalStat>()
+        .map_err(|e| format!("RS_ZonalStats: {e}").into())
 }
 
 impl RsZonalStats {
@@ -1013,7 +1001,7 @@ impl RsZonalStats {
                 reader.zonal_stats_polygon(meta, &zone, band),
             )
             .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
-            rows.push(zonal_stat_value(&z, &stat));
+            rows.push(z.value(stat));
         }
         write_values(&mut output.flat_vector(), &rows);
         Ok(())
@@ -1093,7 +1081,7 @@ impl RsZonalStats {
             .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
             rows.push(Some(
                 slot.iter()
-                    .map(|s| s.and_then(|j| zonal_stat_value(&zs[j], &stat)))
+                    .map(|s| s.and_then(|j| zs[j].value(stat)))
                     .collect(),
             ));
         }
@@ -1179,7 +1167,7 @@ impl VScalar for RsZonalStats {
             let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
             let z = engine::futures::executor::block_on(reader.zonal_stats(meta, bbox, band))
                 .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
-            rows.push(zonal_stat_value(&z, &stat));
+            rows.push(z.value(stat));
         }
         write_values(&mut output.flat_vector(), &rows);
         Ok(())
