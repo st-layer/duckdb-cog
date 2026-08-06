@@ -1416,3 +1416,107 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     con.register_scalar_function::<RsRasterToWorldCoord>("RS_RasterToWorldCoord")?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    use engine::futures::future::BoxFuture;
+
+    /// 첫 poll 에 in-flight 증가 + Pending, 두 번째 poll 에 완료 —
+    /// run_rows(#74)가 실제로 겹쳐 실행하는지(최대 동시 수)를 관찰한다.
+    struct StepFuture {
+        started: bool,
+        result: Option<Result<usize, String>>,
+        in_flight: Arc<AtomicUsize>,
+        max_seen: Arc<AtomicUsize>,
+    }
+
+    impl Future for StepFuture {
+        type Output = Result<usize, String>;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if !self.started {
+                self.started = true;
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_seen.fetch_max(now, Ordering::SeqCst);
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Poll::Ready(self.result.take().expect("완료 후 재poll 금지"))
+        }
+    }
+
+    fn step(
+        result: Result<usize, String>,
+        in_flight: &Arc<AtomicUsize>,
+        max_seen: &Arc<AtomicUsize>,
+    ) -> BoxFuture<'static, Result<usize, String>> {
+        Box::pin(StepFuture {
+            started: false,
+            result: Some(result),
+            in_flight: Arc::clone(in_flight),
+            max_seen: Arc::clone(max_seen),
+        })
+    }
+
+    #[test]
+    fn run_rows_preserves_order_caps_concurrency_and_keeps_null_slots() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let rows: Vec<Option<BoxFuture<'static, Result<usize, String>>>> = (0..10)
+            .map(|i| {
+                // 행 3 = NULL 인자 행 (future 없음) — 자리 보존 확인용
+                (i != 3).then(|| step(Ok(i), &in_flight, &max_seen))
+            })
+            .collect();
+
+        let out = engine::futures::executor::block_on(run_rows(rows, 4)).expect("에러 없음");
+        assert_eq!(out.len(), 10);
+        assert_eq!(out[3], None, "None 행 자리 보존");
+        for (i, v) in out.iter().enumerate() {
+            if i != 3 {
+                assert_eq!(*v, Some(i), "출력 순서 = 입력 순서 (행 {i})");
+            }
+        }
+        let max = max_seen.load(Ordering::SeqCst);
+        assert!(max <= 4, "cap 초과: {max}");
+        assert!(max >= 2, "동시 실행이 실제로 일어나야 함: {max}");
+    }
+
+    #[test]
+    fn run_rows_returns_the_lowest_row_error_deterministically() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let rows: Vec<Option<BoxFuture<'static, Result<usize, String>>>> = (0..6)
+            .map(|i| {
+                let r = if i == 2 || i == 5 {
+                    Err(format!("err-{i}"))
+                } else {
+                    Ok(i)
+                };
+                Some(step(r, &in_flight, &max_seen))
+            })
+            .collect();
+
+        let err = engine::futures::executor::block_on(run_rows(rows, 8)).unwrap_err();
+        assert_eq!(err, "err-2", "여러 에러 중 최소 행 인덱스 것 (결정성)");
+    }
+
+    #[test]
+    fn run_rows_cap_one_is_sequential() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let rows: Vec<Option<BoxFuture<'static, Result<usize, String>>>> =
+            (0..4).map(|i| Some(step(Ok(i), &in_flight, &max_seen))).collect();
+
+        let out = engine::futures::executor::block_on(run_rows(rows, 1)).expect("에러 없음");
+        assert_eq!(out, vec![Some(0), Some(1), Some(2), Some(3)]);
+        assert_eq!(max_seen.load(Ordering::SeqCst), 1, "cap 1 = 순차 폴백");
+    }
+}
