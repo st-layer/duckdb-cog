@@ -758,3 +758,36 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
     }
     Ok(())
 }
+
+#[cfg(all(test, not(target_os = "emscripten")))]
+mod tests {
+    use super::*;
+
+    /// #72: store(= reqwest Client 커넥션 풀)는 origin 단위로 공유돼야 한다 —
+    /// open 마다 새 Client 면 COG 마다 TLS 핸드셰이크를 새로 지불한다.
+    /// (store 생성은 IO 가 없어 네트워크 불필요 — 순수 구성 검사.)
+    #[test]
+    fn object_store_client_is_shared_per_origin() {
+        let a = ObjectStoreSource::open("https://cache-test.invalid/a/b.tif").expect("open");
+        let b = ObjectStoreSource::open("https://cache-test.invalid/c/d.tif").expect("open");
+        assert!(
+            std::sync::Arc::ptr_eq(&a.store, &b.store),
+            "같은 origin 은 store(커넥션 풀)를 공유해야 한다"
+        );
+
+        let c = ObjectStoreSource::open("https://other-host.invalid/a/b.tif").expect("open");
+        assert!(
+            !std::sync::Arc::ptr_eq(&a.store, &c.store),
+            "다른 origin 은 별도 store"
+        );
+
+        // 자격증명 env 변화는 새 store — "open 마다 env 반영" 의미론 보존
+        std::env::set_var("AWS_ACCESS_KEY_ID", "cache-key-probe");
+        let d = ObjectStoreSource::open("https://cache-test.invalid/a/b.tif").expect("open");
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        assert!(
+            !std::sync::Arc::ptr_eq(&a.store, &d.store),
+            "env 스냅샷이 다르면 별도 store"
+        );
+    }
+}
