@@ -3,6 +3,15 @@ name = "engine-wasm"       # 임시명 — engine 과 함께 R6(네이밍)에서
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
+# 아래 두 필드는 wasm-pack 이 생성하는 package.json 으로 흘러들어간다
+description = "GDAL-free Cloud-Optimized GeoTIFF reader for the browser (duckdb-cog engine sidecar)"
+repository = "https://github.com/st-layer/duckdb-cog"
+
+# wasm-pack 동봉 wasm-opt(구형 binaryen)가 최신 rustc 출력 검증에 실패
+# ("Fatal: error validating input") — 비활성화. 크기 최적화가 필요해지면
+# 최신 binaryen 을 별도 단계로 도입한다.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
 
 [lib]
 # cdylib = wasm-pack 산출물, rlib = wasm-bindgen-test 테스트 크레이트 링크용

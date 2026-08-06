@@ -12,3 +12,4 @@ docs/worklog/
 /test/data/generated/
 __pycache__/
 .ipynb_checkpoints/
+/crates/engine-wasm/pkg/
