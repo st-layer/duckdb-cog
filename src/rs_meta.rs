@@ -943,6 +943,78 @@ fn parse_zonal_stat(raw: duckdb_string_t) -> Result<engine::ZonalStat, Box<dyn E
         .map_err(|e| format!("RS_ZonalStats: {e}").into())
 }
 
+/// 청크 행 동시성 캡 (#74) — `COG_FETCH_CONCURRENCY` (기본 16, 1 = 순차 폴백).
+fn zonal_concurrency() -> usize {
+    std::env::var("COG_FETCH_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(16)
+}
+
+/// 유일 경로들을 동시에 연다 (#74) — 캡 준수, 첫 등장 순서로 에러 판정 (결정적).
+/// per-chunk map 이 Arc 를 쥐므로 전역 리더 캐시 cap 축출과 무관하다.
+async fn open_paths(
+    paths: &[String],
+    cap: usize,
+) -> Result<HashMap<String, std::sync::Arc<engine::SharedCog>>, String> {
+    use engine::futures::stream::{self, StreamExt};
+    let mut uniq: Vec<&String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in paths {
+        if seen.insert(p.as_str()) {
+            uniq.push(p);
+        }
+    }
+    let opened: Vec<_> = stream::iter(uniq.iter().map(|p| super::open_cog_cached_async(p)))
+        .buffered(cap.max(1))
+        .collect()
+        .await;
+    let mut map = HashMap::with_capacity(uniq.len());
+    for (p, res) in uniq.into_iter().zip(opened) {
+        map.insert(p.clone(), res.map_err(|e| format!("RS_ZonalStats: {e}"))?);
+    }
+    Ok(map)
+}
+
+/// 청크 행 future 들을 **순서 보존 + 동시 cap** 으로 실행한다 (#74).
+///
+/// None 행(NULL 인자)은 자리 유지. 실패가 여럿이면 최소 행 인덱스의 에러
+/// 하나를 반환한다 (buffered 가 순서를 보존하므로 첫 Err = 최소 행).
+/// 네트워크는 ByteSource 가 tokio 런타임에 spawn 하므로 하나의 block_on
+/// 아래서도 겹치고, decode 는 종전대로 호출 스레드에서 돈다 (모델 불변).
+async fn run_rows<T>(
+    rows: Vec<Option<engine::futures::future::BoxFuture<'static, Result<T, String>>>>,
+    cap: usize,
+) -> Result<Vec<Option<T>>, String> {
+    use engine::futures::stream::{self, StreamExt};
+    let wrapped = rows.into_iter().map(|opt| async move {
+        match opt {
+            Some(f) => f.await.map(Some),
+            None => Ok(None),
+        }
+    });
+    let results: Vec<Result<Option<T>, String>> =
+        stream::iter(wrapped).buffered(cap.max(1)).collect().await;
+    let mut out = Vec::with_capacity(results.len());
+    let mut first_err: Option<String> = None;
+    for r in results {
+        match r {
+            Ok(v) => out.push(v),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                out.push(None);
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
 impl RsZonalStats {
     /// WKT VARCHAR zone 경로 (#48) — 폴리곤 파싱은 청크-로컬 dedupe
     /// (필지 리터럴이 행마다 반복되는 워크로드 대비, 경로 캐시와 동일 패턴).
@@ -961,48 +1033,75 @@ impl RsZonalStats {
         let statv = input.flat_vector(3);
         let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
 
-        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
-        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
-        let mut zones: HashMap<String, Rc<engine::Zone>> = HashMap::new();
-        let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
+        // Phase 1 (sync): 행별 파싱 — zone 은 청크-로컬 dedupe (Arc: 행 future 로 이동)
+        struct Job {
+            stat: engine::ZonalStat,
+            zone: std::sync::Arc<engine::Zone>,
+            path: String,
+            band: u32,
+        }
+        let mut zones: HashMap<String, std::sync::Arc<engine::Zone>> = HashMap::new();
+        let mut jobs: Vec<Option<Job>> = Vec::with_capacity(n);
         for i in 0..n {
             if paths.row_is_null(i as u64)
                 || zonev.row_is_null(i as u64)
                 || bandv.row_is_null(i as u64)
                 || statv.row_is_null(i as u64)
             {
-                rows.push(None);
+                jobs.push(None);
                 continue;
             }
             let stat = parse_zonal_stat(stats[i])?;
             let wkt = DuckString::new(&mut { raw_zones[i] }).as_str().into_owned();
             let zone = match zones.get(&wkt) {
-                Some(z) => Rc::clone(z),
+                Some(z) => std::sync::Arc::clone(z),
                 None => {
                     let z = engine::parse_zone_wkt(&wkt)
-                        .map(Rc::new)
+                        .map(std::sync::Arc::new)
                         .map_err(|e| format!("RS_ZonalStats: {e}"))?;
-                    zones.insert(wkt, Rc::clone(&z));
+                    zones.insert(wkt, std::sync::Arc::clone(&z));
                     z
                 }
             };
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
-            let opened = match cache.get(&path) {
-                Some(o) => std::sync::Arc::clone(o),
-                None => {
-                    let o = open_cog_cached(&path).map_err(|e| format!("RS_ZonalStats: {e}"))?;
-                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
-                    o
-                }
-            };
-            let (meta, reader) = (&opened.0, &opened.1);
             let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
-            let z = engine::futures::executor::block_on(
-                reader.zonal_stats_polygon(meta, &zone, band),
-            )
-            .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
-            rows.push(z.value(stat));
+            jobs.push(Some(Job {
+                stat,
+                zone,
+                path,
+                band,
+            }));
         }
+
+        // Phase 2+3 (#74): 유일 경로 동시 open → 행별 zonal 동시 실행 (순서 보존)
+        let cap = zonal_concurrency();
+        let out = engine::futures::executor::block_on(async {
+            let path_list: Vec<String> = jobs.iter().flatten().map(|j| j.path.clone()).collect();
+            let opened = open_paths(&path_list, cap).await?;
+            let futs = jobs
+                .into_iter()
+                .map(|job| {
+                    job.map(|j| {
+                        let o = std::sync::Arc::clone(&opened[&j.path]);
+                        let fut: engine::futures::future::BoxFuture<
+                            'static,
+                            Result<Option<f64>, String>,
+                        > = Box::pin(async move {
+                            let z = o
+                                .1
+                                .zonal_stats_polygon(&o.0, &j.zone, j.band)
+                                .await
+                                .map_err(|e| format!("RS_ZonalStats: '{}': {e}", j.path))?;
+                            Ok(z.value(j.stat))
+                        });
+                        fut
+                    })
+                })
+                .collect();
+            run_rows(futs, cap).await
+        })?;
+        // Some(None) = G11 null, None = NULL 인자 행 — 출력에선 동일하게 NULL
+        let rows: Vec<Option<f64>> = out.into_iter().map(Option::flatten).collect();
         write_values(&mut output.flat_vector(), &rows);
         Ok(())
     }
@@ -1036,21 +1135,27 @@ impl RsZonalStats {
         let statv = input.flat_vector(3);
         let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
 
-        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
-        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
-        let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(n);
+        // Phase 1 (sync): 행별 파싱 (zone 목록 포함) — 파싱 실패는 즉시 에러 (기존 규약)
+        struct Job {
+            stat: engine::ZonalStat,
+            /// NULL 원소는 자리만 남기고 유효 원소만 엔진 배치로 (자리 복원용)
+            slot: Vec<Option<usize>>,
+            zones: Vec<engine::Zone>,
+            path: String,
+            band: u32,
+        }
+        let mut jobs: Vec<Option<Job>> = Vec::with_capacity(n);
         for i in 0..n {
             if paths.row_is_null(i as u64)
                 || znull.row_is_null(i as u64)
                 || bandv.row_is_null(i as u64)
                 || statv.row_is_null(i as u64)
             {
-                rows.push(None);
+                jobs.push(None);
                 continue;
             }
             let stat = parse_zonal_stat(stats[i])?;
             let (off, len) = zl.get_entry(i);
-            // NULL 원소는 자리만 남기고 유효 원소만 엔진 배치로 (자리 복원용 slot)
             let mut slot: Vec<Option<usize>> = Vec::with_capacity(len);
             let mut zones: Vec<engine::Zone> = Vec::new();
             for (k, raw) in raw_zones.iter().enumerate().skip(off).take(len) {
@@ -1065,26 +1170,46 @@ impl RsZonalStats {
                 }
             }
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
-            let opened = match cache.get(&path) {
-                Some(o) => std::sync::Arc::clone(o),
-                None => {
-                    let o = open_cog_cached(&path).map_err(|e| format!("RS_ZonalStats: {e}"))?;
-                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
-                    o
-                }
-            };
-            let (meta, reader) = (&opened.0, &opened.1);
             let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
-            let zs = engine::futures::executor::block_on(
-                reader.zonal_stats_polygon_batch(meta, &zones, band),
-            )
-            .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
-            rows.push(Some(
-                slot.iter()
-                    .map(|s| s.and_then(|j| zs[j].value(stat)))
-                    .collect(),
-            ));
+            jobs.push(Some(Job {
+                stat,
+                slot,
+                zones,
+                path,
+                band,
+            }));
         }
+
+        // Phase 2+3 (#74): 유일 경로 동시 open → 행별 배치 zonal 동시 실행
+        let cap = zonal_concurrency();
+        let rows: Vec<Option<Vec<Option<f64>>>> = engine::futures::executor::block_on(async {
+            let path_list: Vec<String> = jobs.iter().flatten().map(|j| j.path.clone()).collect();
+            let opened = open_paths(&path_list, cap).await?;
+            let futs = jobs
+                .into_iter()
+                .map(|job| {
+                    job.map(|j| {
+                        let o = std::sync::Arc::clone(&opened[&j.path]);
+                        let fut: engine::futures::future::BoxFuture<
+                            'static,
+                            Result<Vec<Option<f64>>, String>,
+                        > = Box::pin(async move {
+                            let zs = o
+                                .1
+                                .zonal_stats_polygon_batch(&o.0, &j.zones, j.band)
+                                .await
+                                .map_err(|e| format!("RS_ZonalStats: '{}': {e}", j.path))?;
+                            Ok(j.slot
+                                .iter()
+                                .map(|s| s.and_then(|k| zs[k].value(j.stat)))
+                                .collect())
+                        });
+                        fut
+                    })
+                })
+                .collect();
+            run_rows(futs, cap).await
+        })?;
         write_list_rows(&rows, output);
         Ok(())
     }
@@ -1127,16 +1252,21 @@ impl VScalar for RsZonalStats {
         let statv = input.flat_vector(3);
         let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
 
-        // 청크-로컬 dedupe (전역 캐시 락 왕복 절약) — 항목은 전역 캐시와 공유 (#26)
-        let mut cache: HashMap<String, std::sync::Arc<engine::SharedCog>> = HashMap::new();
-        let mut rows: Vec<Option<f64>> = Vec::with_capacity(n);
+        // Phase 1 (sync): 행별 파싱 — bbox 검증·NULL 원소 규약은 기존 그대로
+        struct Job {
+            stat: engine::ZonalStat,
+            bbox: [f64; 4],
+            path: String,
+            band: u32,
+        }
+        let mut jobs: Vec<Option<Job>> = Vec::with_capacity(n);
         for i in 0..n {
             if paths.row_is_null(i as u64)
                 || bnull.row_is_null(i as u64)
                 || bandv.row_is_null(i as u64)
                 || statv.row_is_null(i as u64)
             {
-                rows.push(None);
+                jobs.push(None);
                 continue;
             }
             let stat = parse_zonal_stat(stats[i])?;
@@ -1150,25 +1280,49 @@ impl VScalar for RsZonalStats {
             // 원소 NULL 은 NaN 으로 흘러 engine 검증(비유한)이 에러로 승격하기 전에
             // 행 NULL 로 처리 (다른 함수들의 NULL 인자 규약과 정합)
             if (0..4).any(|k| bchild.row_is_null((bo + k) as u64)) {
-                rows.push(None);
+                jobs.push(None);
                 continue;
             }
             let bbox = [bvals[bo], bvals[bo + 1], bvals[bo + 2], bvals[bo + 3]];
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
-            let opened = match cache.get(&path) {
-                Some(o) => std::sync::Arc::clone(o),
-                None => {
-                    let o = open_cog_cached(&path).map_err(|e| format!("RS_ZonalStats: {e}"))?;
-                    cache.insert(path.clone(), std::sync::Arc::clone(&o));
-                    o
-                }
-            };
-            let (meta, reader) = (&opened.0, &opened.1);
             let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
-            let z = engine::futures::executor::block_on(reader.zonal_stats(meta, bbox, band))
-                .map_err(|e| format!("RS_ZonalStats: '{path}': {e}"))?;
-            rows.push(z.value(stat));
+            jobs.push(Some(Job {
+                stat,
+                bbox,
+                path,
+                band,
+            }));
         }
+
+        // Phase 2+3 (#74): 유일 경로 동시 open → 행별 zonal 동시 실행 (순서 보존)
+        let cap = zonal_concurrency();
+        let out = engine::futures::executor::block_on(async {
+            let path_list: Vec<String> = jobs.iter().flatten().map(|j| j.path.clone()).collect();
+            let opened = open_paths(&path_list, cap).await?;
+            let futs = jobs
+                .into_iter()
+                .map(|job| {
+                    job.map(|j| {
+                        let o = std::sync::Arc::clone(&opened[&j.path]);
+                        let fut: engine::futures::future::BoxFuture<
+                            'static,
+                            Result<Option<f64>, String>,
+                        > = Box::pin(async move {
+                            let z = o
+                                .1
+                                .zonal_stats(&o.0, j.bbox, j.band)
+                                .await
+                                .map_err(|e| format!("RS_ZonalStats: '{}': {e}", j.path))?;
+                            Ok(z.value(j.stat))
+                        });
+                        fut
+                    })
+                })
+                .collect();
+            run_rows(futs, cap).await
+        })?;
+        // Some(None) = G11 null, None = NULL 인자 행 — 출력에선 동일하게 NULL
+        let rows: Vec<Option<f64>> = out.into_iter().map(Option::flatten).collect();
         write_values(&mut output.flat_vector(), &rows);
         Ok(())
     }
@@ -1415,4 +1569,108 @@ pub(crate) fn register(con: &Connection) -> duckdb::Result<()> {
     con.register_scalar_function::<RsWorldToRasterCoord>("RS_WorldToRasterCoord")?;
     con.register_scalar_function::<RsRasterToWorldCoord>("RS_RasterToWorldCoord")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    use engine::futures::future::BoxFuture;
+
+    /// 첫 poll 에 in-flight 증가 + Pending, 두 번째 poll 에 완료 —
+    /// run_rows(#74)가 실제로 겹쳐 실행하는지(최대 동시 수)를 관찰한다.
+    struct StepFuture {
+        started: bool,
+        result: Option<Result<usize, String>>,
+        in_flight: Arc<AtomicUsize>,
+        max_seen: Arc<AtomicUsize>,
+    }
+
+    impl Future for StepFuture {
+        type Output = Result<usize, String>;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if !self.started {
+                self.started = true;
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_seen.fetch_max(now, Ordering::SeqCst);
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Poll::Ready(self.result.take().expect("완료 후 재poll 금지"))
+        }
+    }
+
+    fn step(
+        result: Result<usize, String>,
+        in_flight: &Arc<AtomicUsize>,
+        max_seen: &Arc<AtomicUsize>,
+    ) -> BoxFuture<'static, Result<usize, String>> {
+        Box::pin(StepFuture {
+            started: false,
+            result: Some(result),
+            in_flight: Arc::clone(in_flight),
+            max_seen: Arc::clone(max_seen),
+        })
+    }
+
+    #[test]
+    fn run_rows_preserves_order_caps_concurrency_and_keeps_null_slots() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let rows: Vec<Option<BoxFuture<'static, Result<usize, String>>>> = (0..10)
+            .map(|i| {
+                // 행 3 = NULL 인자 행 (future 없음) — 자리 보존 확인용
+                (i != 3).then(|| step(Ok(i), &in_flight, &max_seen))
+            })
+            .collect();
+
+        let out = engine::futures::executor::block_on(run_rows(rows, 4)).expect("에러 없음");
+        assert_eq!(out.len(), 10);
+        assert_eq!(out[3], None, "None 행 자리 보존");
+        for (i, v) in out.iter().enumerate() {
+            if i != 3 {
+                assert_eq!(*v, Some(i), "출력 순서 = 입력 순서 (행 {i})");
+            }
+        }
+        let max = max_seen.load(Ordering::SeqCst);
+        assert!(max <= 4, "cap 초과: {max}");
+        assert!(max >= 2, "동시 실행이 실제로 일어나야 함: {max}");
+    }
+
+    #[test]
+    fn run_rows_returns_the_lowest_row_error_deterministically() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let rows: Vec<Option<BoxFuture<'static, Result<usize, String>>>> = (0..6)
+            .map(|i| {
+                let r = if i == 2 || i == 5 {
+                    Err(format!("err-{i}"))
+                } else {
+                    Ok(i)
+                };
+                Some(step(r, &in_flight, &max_seen))
+            })
+            .collect();
+
+        let err = engine::futures::executor::block_on(run_rows(rows, 8)).unwrap_err();
+        assert_eq!(err, "err-2", "여러 에러 중 최소 행 인덱스 것 (결정성)");
+    }
+
+    #[test]
+    fn run_rows_cap_one_is_sequential() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let rows: Vec<Option<BoxFuture<'static, Result<usize, String>>>> =
+            (0..4).map(|i| Some(step(Ok(i), &in_flight, &max_seen))).collect();
+
+        let out = engine::futures::executor::block_on(run_rows(rows, 1)).expect("에러 없음");
+        assert_eq!(out, vec![Some(0), Some(1), Some(2), Some(3)]);
+        assert_eq!(max_seen.load(Ordering::SeqCst), 1, "cap 1 = 순차 폴백");
+    }
 }

@@ -178,6 +178,9 @@ and the cache is thrashing: raise `COG_TILE_CACHE_MB` or improve locality.
 **Remote IO concurrency**: range fetches run on a dedicated IO thread pool
 sized to your CPU count (capped at 8); set `COG_IO_THREADS` to override —
 e.g. raise it on fat links with many concurrent remote queries.
+`RS_ZonalStats` additionally runs the rows of each chunk concurrently
+(a time series over N scenes costs ~the slowest read, not the sum);
+`COG_FETCH_CONCURRENCY` caps the in-flight rows (default 16, `1` = sequential).
 
 **Access locality matters**: group zone calls **by scene, not by zone** —
 iterating parcels × scenes in parcel order re-opens every scene's working

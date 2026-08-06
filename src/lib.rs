@@ -278,26 +278,38 @@ fn tile_cache() -> Option<&'static engine::TileCache> {
 /// 콜드 측정 도구라 이 경로를 쓰지 않는다.
 #[cfg(not(target_os = "emscripten"))]
 fn open_cog_cached(path: &str) -> std::result::Result<std::sync::Arc<engine::SharedCog>, String> {
-    use engine::futures::executor::block_on;
+    engine::futures::executor::block_on(open_cog_cached_async(path))
+}
+
+/// [`open_cog_cached`] 의 async 코어 (#74) — 청크 행 동시 실행이 open 을
+/// 겹칠 수 있게 한다. ReaderCache 는 open await 동안 락을 잡지 않으므로
+/// 서로 다른 key 의 동시 open 이 직렬화되지 않는다 (engine cache.rs 참조).
+#[cfg(not(target_os = "emscripten"))]
+async fn open_cog_cached_async(
+    path: &str,
+) -> std::result::Result<std::sync::Arc<engine::SharedCog>, String> {
     if path.contains("://") {
         let p = path.to_string();
-        block_on(remote_cache().get_or_open(path, move || {
-            Box::pin(async move {
-                let source = open_source(&p)?;
-                let (meta, mut reader) = engine::open_cog(source)
-                    .await
-                    .map_err(|e| format!("'{p}': {e}"))?;
-                // 타일 데이터 캐시 (#55): 원격 리더에만 — 리더 재열림마다 새
-                // ReaderId 라서 리더 캐시 TTL 이 타일 무효화까지 겸한다.
-                if let Some(tc) = tile_cache() {
-                    reader.attach_tile_cache(tc);
-                }
-                Ok((meta, reader))
+        remote_cache()
+            .get_or_open(path, move || {
+                Box::pin(async move {
+                    let source = open_source(&p)?;
+                    let (meta, mut reader) = engine::open_cog(source)
+                        .await
+                        .map_err(|e| format!("'{p}': {e}"))?;
+                    // 타일 데이터 캐시 (#55): 원격 리더에만 — 리더 재열림마다 새
+                    // ReaderId 라서 리더 캐시 TTL 이 타일 무효화까지 겸한다.
+                    if let Some(tc) = tile_cache() {
+                        reader.attach_tile_cache(tc);
+                    }
+                    Ok((meta, reader))
+                })
             })
-        }))
+            .await
     } else {
         let source = open_source(path)?;
-        block_on(engine::open_cog(source))
+        engine::open_cog(source)
+            .await
             .map(std::sync::Arc::new)
             .map_err(|e| format!("'{path}': {e}"))
     }
