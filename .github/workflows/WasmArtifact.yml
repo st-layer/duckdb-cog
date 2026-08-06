@@ -1,0 +1,42 @@
+# 사이드카 배포 (#66): 릴리스 발행 시 wasm-pack .tgz 를 Release 자산으로 첨부.
+# npm 레지스트리 배포는 하지 않는다 (스코프 결정 — #66 코멘트, R6 네이밍 미결).
+# st-layer.xyz 소비: npm install <release .tgz URL>
+name: WasmArtifact
+on:
+  release:
+    types: [published]
+  # PR 게이트: 빌드·팩이 계속 성립하는지 실증 (업로드는 release 이벤트에서만)
+  pull_request:
+    paths:
+      - ".github/workflows/WasmArtifact.yml"
+      - "crates/engine-wasm/**"
+      - "crates/engine/**"
+
+jobs:
+  pack:
+    name: just wasm-artifact
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # release 자산 업로드
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: just wasm-artifact
+      # PR 런: 인스펙션용 아티팩트 (릴리스 아님)
+      - if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-wasm-tgz
+          path: crates/engine-wasm/pkg/*.tgz
+      # 릴리스 런: 태그 시점 코드로 빌드된 tgz 를 해당 릴리스에 첨부
+      - if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" crates/engine-wasm/pkg/*.tgz --clobber
