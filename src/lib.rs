@@ -196,13 +196,53 @@ impl ObjectStoreSource {
             // 평문 http 는 명시적 opt-in (로컬 테스트 서버·사내 http 스토리지).
             opts.push(("allow_http".into(), "true".into()));
         }
+        // location 매핑은 parse_url_opts 를 그대로 거친다 (object_store 와 100%
+        // 동일 유지). Client 생성 자체는 IO 없는 싼 작업 — 비용은 풀 상실이라
+        // 캐시 히트 시 fresh store 를 버려도 손해가 없다.
+        let key = store_cache_key(&url, &opts);
         let (store, location) = object_store::parse_url_opts(&url, opts).map_err(|e| err(&e))?;
         Ok(Self {
             url: url_str.to_string(),
-            store: store.into(),
+            store: shared_store(key, store.into()),
             location,
         })
     }
+}
+
+/// store 캐시 키: origin(scheme://host[:port]) + 구성 opts 해시.
+/// 같은 origin 이라도 자격증명 env 가 바뀌면 다른 키 — "open 마다 env 반영"
+/// 의미론 보존. env::vars() 순서는 비결정이라 정렬 후 해시.
+#[cfg(not(target_os = "emscripten"))]
+fn store_cache_key(url: &url::Url, opts: &[(String, String)]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&(String, String)> = opts.iter().collect();
+    sorted.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    sorted.hash(&mut h);
+    format!("{}|{:016x}", &url[..url::Position::BeforePath], h.finish())
+}
+
+/// origin 단위 store 공유 (#72): object_store 는 store 마다 새 reqwest Client
+/// (빈 커넥션 풀)를 만들어, 종전에는 **COG open 마다 DNS+TCP+TLS 를 새로
+/// 지불**했다 (원격 open 1.03s 중 ~0.8s — 시계열 22 read 에서 GDAL 대비 2.1×).
+/// 같은 origin 의 리더들이 풀을 공유하면 핸드셰이크는 풀 커넥션당 1회가 된다.
+#[cfg(not(target_os = "emscripten"))]
+fn shared_store(
+    key: String,
+    fresh: std::sync::Arc<dyn object_store::ObjectStore>,
+) -> std::sync::Arc<dyn object_store::ObjectStore> {
+    use std::collections::HashMap;
+    type StoreMap = HashMap<String, std::sync::Arc<dyn object_store::ObjectStore>>;
+    static STORES: std::sync::OnceLock<std::sync::Mutex<StoreMap>> = std::sync::OnceLock::new();
+    let mut map = STORES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // 캡 초과 시 통째 clear — 조잡하지만 단순 (origin 수는 실사용에서 한 자릿수)
+    if map.len() >= 32 && !map.contains_key(&key) {
+        map.clear();
+    }
+    std::sync::Arc::clone(map.entry(key).or_insert(fresh))
 }
 
 #[cfg(not(target_os = "emscripten"))]
