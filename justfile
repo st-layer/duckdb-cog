@@ -109,6 +109,26 @@ wasm-test: fixtures
     fi
     wasm-pack test --headless --chrome crates/engine-wasm
 
+# 사이드카 배포 산출물 (#66) — wasm-pack build+pack 으로 npm 설치 가능한 .tgz
+# 를 만든다. 배포 채널은 GitHub Release 자산 (WasmArtifact.yml 이 릴리스 발행
+# 시 자동 첨부) — npm 레지스트리 배포는 하지 않는다 (#66 스코프 결정, R6 미결).
+wasm-artifact:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+        export CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang
+        export AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar
+    fi
+    command -v wasm-pack >/dev/null || { echo "wasm-pack 없음 — brew install wasm-pack" >&2; exit 1; }
+    command -v npm >/dev/null || { echo "npm 없음 (wasm-pack pack 이 요구) — node 설치 필요" >&2; exit 1; }
+    wasm-pack build crates/engine-wasm --target web --release
+    wasm-pack pack crates/engine-wasm
+    # 스모크: 산출 tgz 에 핵심 파일이 실려 있는지 (빈/불완전 패키지 방지)
+    tgz=$(ls crates/engine-wasm/pkg/*.tgz)
+    tar -tzf "$tgz" | grep -q 'engine_wasm_bg.wasm'
+    tar -tzf "$tgz" | grep -q 'package.json'
+    echo "OK: $tgz"
+
 # 결정적 픽스처 생성 (seed 고정 — 해시가 tests/oracle/fixtures.lock 과 일치해야 함)
 fixtures:
     uv run python scripts/gen_fixtures.py
