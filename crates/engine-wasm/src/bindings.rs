@@ -114,19 +114,27 @@ async fn zonal_value<S: ByteSource>(
     Ok(opt_f64(z.value(stat)))
 }
 
-/// 열린 리더 위 zonal 하나 (URL 스칼라·배치 공용).
+/// 열린 리더 위 zonal 하나 (URL 스칼라·배치 공용). `max_pixels`(#71) 예산이
+/// 있으면 오버뷰 레벨 근사 — 네이티브와 같은 select_level/value_scaled 경로
+/// (count/sum 은 level-0 환산 추정, 0 = exact).
 async fn zonal_on(
     opened: &registry::Opened,
     zone: &Zone,
     band: u32,
     stat: ZonalStat,
+    max_pixels: u64,
 ) -> Result<JsValue, JsValue> {
+    let level = zone
+        .envelope()
+        .map_or(0, |e| engine::select_level(&opened.0, e, max_pixels));
     let z = opened
         .1
-        .zonal_stats_polygon(&opened.0, zone, band)
+        .zonal_stats_polygon_at(&opened.0, zone, band, level)
         .await
         .map_err(err)?;
-    Ok(opt_f64(z.value(stat)))
+    Ok(opt_f64(
+        z.value_scaled(stat, engine::level_scale(&opened.0, level)),
+    ))
 }
 
 /// `cogMetaFromBytes(bytes)` → Promise<meta 객체> ([`meta_to_js`] 참조).
@@ -171,12 +179,26 @@ pub fn zonal_stats_from_bytes(
 /// `zonalStats(url, zoneWkt, band, stat)` → Promise<number|null> — 원격 COG.
 /// 규약은 [`zonal_stats_from_bytes`] 와 동일 (전송 계층만 다르다). 리더는
 /// 레지스트리로 재사용 — 같은 씬 반복 호출(폴리곤 수정)이 타일 캐시 웜 경로.
+/// `maxPixels`(#71, 선택): 픽셀 예산으로 오버뷰 fast mode — 생략/0 = exact.
 #[wasm_bindgen(js_name = zonalStats)]
-pub fn zonal_stats(url: String, zone_wkt: String, band: u32, stat: String) -> Promise {
+pub fn zonal_stats(
+    url: String,
+    zone_wkt: String,
+    band: u32,
+    stat: String,
+    max_pixels: Option<u32>,
+) -> Promise {
     future_to_promise(async move {
         let (zone, stat) = parse_inputs(&zone_wkt, &stat)?;
         let opened = registry::open_cached(&url).await.map_err(err)?;
-        zonal_on(&opened, &zone, band, stat).await
+        zonal_on(
+            &opened,
+            &zone,
+            band,
+            stat,
+            u64::from(max_pixels.unwrap_or(0)),
+        )
+        .await
     })
 }
 
@@ -187,8 +209,15 @@ pub fn zonal_stats(url: String, zone_wkt: String, band: u32, stat: String) -> Pr
 /// **IO 실패는 전체 reject** (해당 URL 포함) — null 은 G11 의미(빈 교차/범위
 /// 밖 밴드/nodata)로만 쓴다. 무음 데이터 손실 금지.
 #[wasm_bindgen(js_name = zonalStatsBatch)]
-pub fn zonal_stats_batch(urls: Array, zone_wkt: String, band: u32, stat: String) -> Promise {
+pub fn zonal_stats_batch(
+    urls: Array,
+    zone_wkt: String,
+    band: u32,
+    stat: String,
+    max_pixels: Option<u32>,
+) -> Promise {
     future_to_promise(async move {
+        let mp = u64::from(max_pixels.unwrap_or(0));
         let (zone, stat) = parse_inputs(&zone_wkt, &stat)?;
         let urls: Vec<String> = urls
             .iter()
@@ -215,7 +244,7 @@ pub fn zonal_stats_batch(urls: Array, zone_wkt: String, band: u32, stat: String)
         let results = join_all(urls.iter().map(|u| {
             let opened = Rc::clone(&by_url[u.as_str()]);
             let zone = &zone;
-            async move { zonal_on(&opened, zone, band, stat).await }
+            async move { zonal_on(&opened, zone, band, stat, mp).await }
         }))
         .await;
         let out = Array::new();
@@ -231,7 +260,13 @@ pub fn zonal_stats_batch(urls: Array, zone_wkt: String, band: u32, stat: String)
 /// fetch 경로 (`zonal_stats_polygon_batch`). WKT 파싱 실패 → reject (네이티브
 /// LIST 오버로드와 동일), 결과는 입력 순서.
 #[wasm_bindgen(js_name = zonalStatsBatchZones)]
-pub fn zonal_stats_batch_zones(url: String, zone_wkts: Array, band: u32, stat: String) -> Promise {
+pub fn zonal_stats_batch_zones(
+    url: String,
+    zone_wkts: Array,
+    band: u32,
+    stat: String,
+    max_pixels: Option<u32>,
+) -> Promise {
     future_to_promise(async move {
         let stat: ZonalStat = stat.parse().map_err(err)?;
         let zones: Vec<Zone> = zone_wkts
@@ -243,14 +278,27 @@ pub fn zonal_stats_batch_zones(url: String, zone_wkts: Array, band: u32, stat: S
             })
             .collect::<Result<_, _>>()?;
         let opened = registry::open_cached(&url).await.map_err(err)?;
+        // #71: zone union envelope 기준 단일 레벨 (네이티브 배치와 동일 규약)
+        let env = zones.iter().filter_map(|z| z.envelope()).reduce(|a, b| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        });
+        let level = env.map_or(0, |e| {
+            engine::select_level(&opened.0, e, u64::from(max_pixels.unwrap_or(0)))
+        });
+        let scale = engine::level_scale(&opened.0, level);
         let zs = opened
             .1
-            .zonal_stats_polygon_batch(&opened.0, &zones, band)
+            .zonal_stats_polygon_batch_at(&opened.0, &zones, band, level)
             .await
             .map_err(err)?;
         let out = Array::new();
         for z in &zs {
-            out.push(&opt_f64(z.value(stat)));
+            out.push(&opt_f64(z.value_scaled(stat, scale)));
         }
         Ok(out.into())
     })

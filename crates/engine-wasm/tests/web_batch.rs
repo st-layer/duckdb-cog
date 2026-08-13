@@ -54,6 +54,7 @@ async fn scene_axis_batch_matches_scalar_goldens() {
         P1.to_string(),
         1,
         "count".to_string(),
+        None,
     ))
     .await
     .expect("resolve");
@@ -69,6 +70,7 @@ async fn scene_axis_batch_preserves_input_order_across_scenes() {
         P1.to_string(),
         1,
         "count".to_string(),
+        None,
     ))
     .await
     .expect("resolve");
@@ -82,6 +84,7 @@ async fn scene_axis_batch_empty_input_resolves_empty() {
         P1.to_string(),
         1,
         "count".to_string(),
+        None,
     ))
     .await
     .expect("resolve");
@@ -96,6 +99,7 @@ async fn zone_axis_batch_matches_native_goldens() {
         str_array(&[P1.to_string(), P2.to_string(), P3.to_string()]),
         1,
         "sum".to_string(),
+        None,
     ))
     .await
     .expect("resolve");
@@ -119,6 +123,7 @@ async fn batch_with_missing_url_rejects_whole_promise() {
         P1.to_string(),
         1,
         "count".to_string(),
+        None,
     ))
     .await
     .expect_err("reject");
@@ -135,6 +140,7 @@ async fn repeat_calls_hit_tile_cache_via_reader_reuse() {
         P3.to_string(),
         1,
         "count".to_string(),
+        None,
     ))
     .await
     .expect("resolve");
@@ -151,6 +157,7 @@ async fn repeat_calls_hit_tile_cache_via_reader_reuse() {
         P3.to_string(),
         1,
         "count".to_string(),
+        None,
     ))
     .await
     .expect("resolve");

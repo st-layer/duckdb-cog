@@ -33,6 +33,7 @@ async fn zonal(wkt: &str, band: u32, stat: &str) -> JsValue {
         wkt.to_string(),
         band,
         stat.to_string(),
+        None,
     ))
     .await
     .expect("resolve")
@@ -76,6 +77,7 @@ async fn missing_url_rejects_with_source_error() {
         P3.to_string(),
         1,
         "count".to_string(),
+        None,
     ))
     .await
     .expect_err("404 는 reject");

@@ -932,6 +932,10 @@ impl VScalar for RsBandStats {
 /// 폴리곤은 순수 Rust PIP (GEOS 비링크 N4 유지) — 픽셀 중심 포함, 경계 위는 비계약.
 /// stat ∈ {count, sum, mean, min, max} (대소문자 무관). 유효 픽셀 없으면
 /// count → 0, 나머지 → NULL. NULL 인자 → NULL. WKT 파싱 실패/미지원 타입 → 에러.
+///
+/// 선택 5번째 인자 `max_pixels` (#71, fast mode): 픽셀 예산으로 오버뷰 레벨을
+/// 골라 **명시적 근사**로 집계한다 — count/sum 은 level-0 환산 추정, min/max
+/// 는 리샘플 감쇠, mean 은 소폭 드리프트. 0/생략 = exact (기본 동작 불변).
 struct RsZonalStats;
 
 /// stat 문자열 검증 — bbox/WKT 두 경로 공용. 이름 매핑과 값 추출은
@@ -1032,6 +1036,9 @@ impl RsZonalStats {
         let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
         let statv = input.flat_vector(3);
         let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
+        // 선택 인자 max_pixels (#71) — 5-인자 오버로드에서만 존재, 없으면 0(exact)
+        let mpv = (input.num_columns() > 4).then(|| input.flat_vector(4));
+        let mps = mpv.as_ref().map(|v| unsafe { v.as_slice_with_len::<i32>(n) });
 
         // Phase 1 (sync): 행별 파싱 — zone 은 청크-로컬 dedupe (Arc: 행 future 로 이동)
         struct Job {
@@ -1039,6 +1046,7 @@ impl RsZonalStats {
             zone: std::sync::Arc<engine::Zone>,
             path: String,
             band: u32,
+            max_pixels: u64,
         }
         let mut zones: HashMap<String, std::sync::Arc<engine::Zone>> = HashMap::new();
         let mut jobs: Vec<Option<Job>> = Vec::with_capacity(n);
@@ -1052,6 +1060,20 @@ impl RsZonalStats {
                 continue;
             }
             let stat = parse_zonal_stat(stats[i])?;
+            // max_pixels (#71): NULL → NULL 행, 음수 → 에러, 0 = exact (기본)
+            let max_pixels = match (&mpv, &mps) {
+                (Some(v), Some(s)) => {
+                    if v.row_is_null(i as u64) {
+                        jobs.push(None);
+                        continue;
+                    }
+                    if s[i] < 0 {
+                        return Err("RS_ZonalStats: max_pixels must be >= 0".into());
+                    }
+                    s[i] as u64
+                }
+                _ => 0,
+            };
             let wkt = DuckString::new(&mut { raw_zones[i] }).as_str().into_owned();
             let zone = match zones.get(&wkt) {
                 Some(z) => std::sync::Arc::clone(z),
@@ -1070,6 +1092,7 @@ impl RsZonalStats {
                 zone,
                 path,
                 band,
+                max_pixels,
             }));
         }
 
@@ -1087,12 +1110,17 @@ impl RsZonalStats {
                             'static,
                             Result<Option<f64>, String>,
                         > = Box::pin(async move {
+                            // #71: 예산이 있으면 오버뷰 레벨 근사 (0 = exact, 기본 불변)
+                            let level = j
+                                .zone
+                                .envelope()
+                                .map_or(0, |e| engine::select_level(&o.0, e, j.max_pixels));
                             let z = o
                                 .1
-                                .zonal_stats_polygon(&o.0, &j.zone, j.band)
+                                .zonal_stats_polygon_at(&o.0, &j.zone, j.band, level)
                                 .await
                                 .map_err(|e| format!("RS_ZonalStats: '{}': {e}", j.path))?;
-                            Ok(z.value(j.stat))
+                            Ok(z.value_scaled(j.stat, engine::level_scale(&o.0, level)))
                         });
                         fut
                     })
@@ -1134,6 +1162,9 @@ impl RsZonalStats {
         let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
         let statv = input.flat_vector(3);
         let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
+        // 선택 인자 max_pixels (#71) — 5-인자 오버로드에서만 존재, 없으면 0(exact)
+        let mpv = (input.num_columns() > 4).then(|| input.flat_vector(4));
+        let mps = mpv.as_ref().map(|v| unsafe { v.as_slice_with_len::<i32>(n) });
 
         // Phase 1 (sync): 행별 파싱 (zone 목록 포함) — 파싱 실패는 즉시 에러 (기존 규약)
         struct Job {
@@ -1143,6 +1174,9 @@ impl RsZonalStats {
             zones: Vec<engine::Zone>,
             path: String,
             band: u32,
+            max_pixels: u64,
+            /// 레벨 선택 기준: zone 들의 union envelope (#71)
+            env: Option<[f64; 4]>,
         }
         let mut jobs: Vec<Option<Job>> = Vec::with_capacity(n);
         for i in 0..n {
@@ -1155,6 +1189,20 @@ impl RsZonalStats {
                 continue;
             }
             let stat = parse_zonal_stat(stats[i])?;
+            // max_pixels (#71): NULL → NULL 행, 음수 → 에러, 0 = exact (기본)
+            let max_pixels = match (&mpv, &mps) {
+                (Some(v), Some(s)) => {
+                    if v.row_is_null(i as u64) {
+                        jobs.push(None);
+                        continue;
+                    }
+                    if s[i] < 0 {
+                        return Err("RS_ZonalStats: max_pixels must be >= 0".into());
+                    }
+                    s[i] as u64
+                }
+                _ => 0,
+            };
             let (off, len) = zl.get_entry(i);
             let mut slot: Vec<Option<usize>> = Vec::with_capacity(len);
             let mut zones: Vec<engine::Zone> = Vec::new();
@@ -1171,12 +1219,17 @@ impl RsZonalStats {
             }
             let path = DuckString::new(&mut { raw_paths[i] }).as_str().into_owned();
             let band = u32::try_from(bands[i]).unwrap_or(0); // 음수 → 범위 밖 → 빈 집계
+            let env = zones.iter().filter_map(|z| z.envelope()).reduce(|a, b| {
+                [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+            });
             jobs.push(Some(Job {
                 stat,
                 slot,
                 zones,
                 path,
                 band,
+                max_pixels,
+                env,
             }));
         }
 
@@ -1194,14 +1247,19 @@ impl RsZonalStats {
                             'static,
                             Result<Vec<Option<f64>>, String>,
                         > = Box::pin(async move {
+                            // #71: union envelope 기준 단일 레벨 (0 = exact, 기본 불변)
+                            let level = j
+                                .env
+                                .map_or(0, |e| engine::select_level(&o.0, e, j.max_pixels));
+                            let scale = engine::level_scale(&o.0, level);
                             let zs = o
                                 .1
-                                .zonal_stats_polygon_batch(&o.0, &j.zones, j.band)
+                                .zonal_stats_polygon_batch_at(&o.0, &j.zones, j.band, level)
                                 .await
                                 .map_err(|e| format!("RS_ZonalStats: '{}': {e}", j.path))?;
                             Ok(j.slot
                                 .iter()
-                                .map(|s| s.and_then(|k| zs[k].value(j.stat)))
+                                .map(|s| s.and_then(|k| zs[k].value_scaled(j.stat, scale)))
                                 .collect())
                         });
                         fut
@@ -1251,6 +1309,9 @@ impl VScalar for RsZonalStats {
         let bands = unsafe { bandv.as_slice_with_len::<i32>(n) };
         let statv = input.flat_vector(3);
         let stats = unsafe { statv.as_slice_with_len::<duckdb_string_t>(n) };
+        // 선택 인자 max_pixels (#71) — 5-인자 오버로드에서만 존재, 없으면 0(exact)
+        let mpv = (input.num_columns() > 4).then(|| input.flat_vector(4));
+        let mps = mpv.as_ref().map(|v| unsafe { v.as_slice_with_len::<i32>(n) });
 
         // Phase 1 (sync): 행별 파싱 — bbox 검증·NULL 원소 규약은 기존 그대로
         struct Job {
@@ -1258,6 +1319,7 @@ impl VScalar for RsZonalStats {
             bbox: [f64; 4],
             path: String,
             band: u32,
+            max_pixels: u64,
         }
         let mut jobs: Vec<Option<Job>> = Vec::with_capacity(n);
         for i in 0..n {
@@ -1270,6 +1332,20 @@ impl VScalar for RsZonalStats {
                 continue;
             }
             let stat = parse_zonal_stat(stats[i])?;
+            // max_pixels (#71): NULL → NULL 행, 음수 → 에러, 0 = exact (기본)
+            let max_pixels = match (&mpv, &mps) {
+                (Some(v), Some(s)) => {
+                    if v.row_is_null(i as u64) {
+                        jobs.push(None);
+                        continue;
+                    }
+                    if s[i] < 0 {
+                        return Err("RS_ZonalStats: max_pixels must be >= 0".into());
+                    }
+                    s[i] as u64
+                }
+                _ => 0,
+            };
             let (bo, bn) = bl.get_entry(i);
             if bn != 4 {
                 return Err(format!(
@@ -1291,6 +1367,7 @@ impl VScalar for RsZonalStats {
                 bbox,
                 path,
                 band,
+                max_pixels,
             }));
         }
 
@@ -1308,12 +1385,14 @@ impl VScalar for RsZonalStats {
                             'static,
                             Result<Option<f64>, String>,
                         > = Box::pin(async move {
+                            // #71: 예산이 있으면 오버뷰 레벨 근사 (0 = exact, 기본 불변)
+                            let level = engine::select_level(&o.0, j.bbox, j.max_pixels);
                             let z = o
                                 .1
-                                .zonal_stats(&o.0, j.bbox, j.band)
+                                .zonal_stats_at(&o.0, j.bbox, j.band, level)
                                 .await
                                 .map_err(|e| format!("RS_ZonalStats: '{}': {e}", j.path))?;
-                            Ok(z.value(j.stat))
+                            Ok(z.value_scaled(j.stat, engine::level_scale(&o.0, level)))
                         });
                         fut
                     })
@@ -1355,6 +1434,37 @@ impl VScalar for RsZonalStats {
                     LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar)),
                     LogicalTypeId::Integer.into(),
                     LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double)),
+            ),
+            // max_pixels 5-인자 오버로드 3종 (#71) — 오버뷰 fast mode (0 = exact)
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double)),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
+                ],
+                LogicalTypeId::Double.into(),
+            ),
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
+                ],
+                LogicalTypeId::Double.into(),
+            ),
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
                 ],
                 LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Double)),
             ),
