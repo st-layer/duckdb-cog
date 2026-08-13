@@ -6,6 +6,46 @@ All notable changes to duckdb-cog. Format follows
 Deployment to `INSTALL cog FROM community` lags tags by one
 community-extensions ref-bump PR — the "Deployed" note per release tracks that.
 
+## [0.4.0] — 2026-08-13
+
+Two threads: the browser sidecar (RFC Decision B) became real, and the remote
+read path got fast enough to outrun a sequential GDAL loop.
+
+### Added
+- **Browser sidecar `engine-wasm`** (#66 → #67/#68/#69/#70): wasm-bindgen
+  bindings over the shared engine — `cogMeta`/`zonalStats` (bytes and URL via
+  a fetch-backed ByteSource), time-series `zonalStatsBatch` and zone-axis
+  `zonalStatsBatchZones`, a URL→reader registry with a browser-tuned tile
+  cache (64 MB default, `configureTileCache`/`tileCacheStats`). Distributed
+  as a `.tgz` attached to GitHub Releases on publish (WasmArtifact workflow),
+  not npm. Headless-Chrome parity suites pin bit-exact agreement with the
+  native goldens.
+- **AOI raster windows in the browser** (#76): `bandWindowPolygon`/`bandWindow`
+  return the polygon's pixels (`Float64Array` + width/height/placement bbox) —
+  the rendered raster is provably the same pixel set the zonal statistic saw;
+  no external tile service, no whole-scene preview.
+- **Overview fast mode** (#71): optional `max_pixels` on `RS_ZonalStats`
+  (all three overloads) and `maxPixels` on the wasm zonal functions — picks
+  the coarsest-sufficient overview level from a pixel budget. Explicitly
+  approximate: count/sum are level-0 rescaled estimates, min/max damp, mean
+  drifts slightly; `0`/omitted = exact, byte-identical to before.
+
+### Changed (performance — 22-read Sentinel-2 time series, Korea → us-west-2)
+- **Per-origin HTTP client sharing** (#72 → #73): every remote open paid
+  DNS+TCP+TLS on a fresh connection pool; 51.7 s → ~30 s.
+- **Concurrent chunk rows in `RS_ZonalStats`** (#74 → #75): rows run
+  concurrently (order-preserving; `COG_FETCH_CONCURRENCY`, default 16);
+  → **9.6–13.0 s**, past the 24–25 s sequential GDAL/rasterio baseline.
+  Values identical to the digit throughout.
+
+### Fixed
+- Tile-cache keys are now level-scoped (#78) — a fast-mode overview tile could
+  silently poison the exact level-0 read of the same tile coordinate.
+- TileCache contention no longer panics on single-threaded wasm (#78) —
+  Condvar wait replaced with duplicate-fetch settlement there.
+
+Deployed: pending — community-extensions ref-bump PR follows the tag.
+
 ## [0.3.0] — 2026-07-30
 
 Driven by production field reports from a season-scale parcel-statistics

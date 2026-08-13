@@ -204,7 +204,10 @@ These are enforced by tests and hooks, not just convention (see
 - **Lazy IO is a tested contract**: an IO-counting test pins that listing a
   COG's tile grid costs a constant number of range reads and never touches
   pixel data.
-- The engine crate stays `wasm32-unknown-unknown`-compilable.
+- The engine crate stays `wasm32-unknown-unknown`-compilable — and ships as a
+  browser sidecar (`engine-wasm`, a `.tgz` on each GitHub Release): remote COG
+  reads, zonal stats (batch + overview fast mode), and AOI pixel windows run
+  fully client-side over HTTP Range.
 
 ## Installation
 
