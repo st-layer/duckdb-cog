@@ -29,7 +29,10 @@ pub use meta::{
     LevelMeta, MetaError, TileRow,
 };
 #[cfg(feature = "reader")]
-pub use pixel::{apply_nodata, normalized_difference, open_cog, CogReader, ZonalStat, ZonalStats};
+pub use pixel::{
+    apply_nodata, level_scale, normalized_difference, open_cog, select_level, CogReader, ZonalStat,
+    ZonalStats,
+};
 #[cfg(feature = "reader")]
 pub use source::{fetch_all, ByteSource, MemorySource, SourceError};
 #[cfg(feature = "reader")]

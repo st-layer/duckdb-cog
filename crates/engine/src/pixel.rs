@@ -227,25 +227,39 @@ impl<S: ByteSource> CogReader<S> {
         bbox: [f64; 4],
         band: u32,
     ) -> Result<ZonalStats, MetaError> {
+        self.zonal_stats_at(meta, bbox, band, 0).await
+    }
+
+    /// 레벨 `level` 에서의 bbox 집계 (#71 fast mode 재료) — **원시(at-level)**
+    /// 값이다: count/sum 을 level-0 추정으로 쓰려면 [`level_scale`] 로 환산.
+    /// 규약은 level 0([`Self::zonal_stats`])과 동일; 범위 밖 레벨 → 빈 집계.
+    pub async fn zonal_stats_at(
+        &self,
+        meta: &CogMeta,
+        bbox: [f64; 4],
+        band: u32,
+        level: usize,
+    ) -> Result<ZonalStats, MetaError> {
         if !bbox.iter().all(|v| v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
             return Err(MetaError::InvalidFilter(format!(
                 "[{}, {}, {}, {}] must be finite with xmin<=xmax and ymin<=ymax",
                 bbox[0], bbox[1], bbox[2], bbox[3]
             )));
         }
-        let Some(g) = &meta.georef else {
+        let Some(g0) = &meta.georef else {
             return Err(MetaError::NotGeoreferenced);
         };
-        let Some(l0) = meta.levels.first() else {
+        let (Some(l0), Some(lv)) = (meta.levels.first(), meta.levels.get(level)) else {
             return Ok(ZonalStats::EMPTY);
         };
         if band == 0 || band > meta.num_bands {
             return Ok(ZonalStats::EMPTY);
         }
-        let Some(window) = center_window(g, l0, bbox) else {
+        let g = level_georef(g0, l0, lv);
+        let Some(window) = center_window(&g, lv, bbox) else {
             return Ok(ZonalStats::EMPTY);
         };
-        self.accumulate_window(meta, window, band, |_, _| true)
+        self.accumulate_window(meta, level, window, band, |_, _| true)
             .await
     }
 
@@ -254,22 +268,23 @@ impl<S: ByteSource> CogReader<S> {
     async fn accumulate_window(
         &self,
         meta: &CogMeta,
+        level: usize,
         (col_min, col_max, row_min, row_max): (u64, u64, u64, u64),
         band: u32,
         keep: impl Fn(u64, u64) -> bool,
     ) -> Result<ZonalStats, MetaError> {
-        let (Some(l0), Some(ifd0)) = (meta.levels.first(), self.ifds.first()) else {
+        let (Some(lv), Some(ifd)) = (meta.levels.get(level), self.ifds.get(level)) else {
             return Ok(ZonalStats::EMPTY);
         };
-        let (tw, th) = (l0.tile_width as u64, l0.tile_height as u64);
+        let (tw, th) = (lv.tile_width as u64, lv.tile_height as u64);
         let mut tiles = Vec::new();
         for ty in (row_min / th)..=(row_max / th) {
             for tx in (col_min / tw)..=(col_max / tw) {
                 tiles.push((tx as usize, ty as usize));
             }
         }
-        let arrays = self.fetch_decoded(ifd0, &tiles).await?;
-        let planar = ifd0.planar_configuration();
+        let arrays = self.fetch_decoded(ifd, &tiles).await?;
+        let planar = ifd.planar_configuration();
         let mut acc = ZonalStats::EMPTY;
         for ((tx, ty), array) in tiles.iter().zip(arrays) {
             let (tx0, ty0) = (*tx as u64 * tw, *ty as u64 * th);
@@ -300,20 +315,38 @@ impl<S: ByteSource> CogReader<S> {
         zones: &[Zone],
         band: u32,
     ) -> Result<Vec<ZonalStats>, MetaError> {
-        let Some(g) = &meta.georef else {
+        self.zonal_stats_polygon_batch_at(meta, zones, band, 0)
+            .await
+    }
+
+    /// 레벨 `level` 에서의 배치 zonal (#71) — 규약은 [`Self::zonal_stats_polygon_batch`]
+    /// 와 동일 (원시 at-level 값, 타일 union 1회 fetch). 범위 밖 레벨 → 빈 집계들.
+    pub async fn zonal_stats_polygon_batch_at(
+        &self,
+        meta: &CogMeta,
+        zones: &[Zone],
+        band: u32,
+        level: usize,
+    ) -> Result<Vec<ZonalStats>, MetaError> {
+        let Some(g0) = &meta.georef else {
             return Err(MetaError::NotGeoreferenced);
         };
-        let (Some(l0), Some(ifd0)) = (meta.levels.first(), self.ifds.first()) else {
+        let (Some(l0), Some(lv), Some(ifd)) = (
+            meta.levels.first(),
+            meta.levels.get(level),
+            self.ifds.get(level),
+        ) else {
             return Ok(vec![ZonalStats::EMPTY; zones.len()]);
         };
         if band == 0 || band > meta.num_bands {
             return Ok(vec![ZonalStats::EMPTY; zones.len()]);
         }
+        let g = level_georef(g0, l0, lv);
         let windows: Vec<Option<(u64, u64, u64, u64)>> = zones
             .iter()
-            .map(|z| z.envelope().and_then(|e| center_window(g, l0, e)))
+            .map(|z| z.envelope().and_then(|e| center_window(&g, lv, e)))
             .collect();
-        let (tw, th) = (l0.tile_width as u64, l0.tile_height as u64);
+        let (tw, th) = (lv.tile_width as u64, lv.tile_height as u64);
         let mut tile_set = std::collections::BTreeSet::new();
         for &(col_min, col_max, row_min, row_max) in windows.iter().flatten() {
             for ty in (row_min / th)..=(row_max / th) {
@@ -323,10 +356,10 @@ impl<S: ByteSource> CogReader<S> {
             }
         }
         let tiles: Vec<(usize, usize)> = tile_set.into_iter().collect();
-        let arrays = self.fetch_decoded(ifd0, &tiles).await?;
+        let arrays = self.fetch_decoded(ifd, &tiles).await?;
         let by_tile: std::collections::HashMap<(usize, usize), std::sync::Arc<Array>> =
             tiles.into_iter().zip(arrays).collect();
-        let planar = ifd0.planar_configuration();
+        let planar = ifd.planar_configuration();
         let (ox, px) = (g.origin_x, g.pixel_x);
         let (oy, py) = (g.origin_y, g.pixel_y);
         let mut out = Vec::with_capacity(zones.len());
@@ -373,10 +406,23 @@ impl<S: ByteSource> CogReader<S> {
         zone: &Zone,
         band: u32,
     ) -> Result<ZonalStats, MetaError> {
-        let Some(g) = &meta.georef else {
+        self.zonal_stats_polygon_at(meta, zone, band, 0).await
+    }
+
+    /// 레벨 `level` 에서의 polygon 집계 (#71 fast mode 재료) — **원시** 값.
+    /// 픽셀 중심 PIP 판정은 레벨 좌표(level_georef)로 — level 0 이면 기존
+    /// 경로와 동일. 범위 밖 레벨 → 빈 집계.
+    pub async fn zonal_stats_polygon_at(
+        &self,
+        meta: &CogMeta,
+        zone: &Zone,
+        band: u32,
+        level: usize,
+    ) -> Result<ZonalStats, MetaError> {
+        let Some(g0) = &meta.georef else {
             return Err(MetaError::NotGeoreferenced);
         };
-        let Some(l0) = meta.levels.first() else {
+        let (Some(l0), Some(lv)) = (meta.levels.first(), meta.levels.get(level)) else {
             return Ok(ZonalStats::EMPTY);
         };
         if band == 0 || band > meta.num_bands {
@@ -385,12 +431,13 @@ impl<S: ByteSource> CogReader<S> {
         let Some(env) = zone.envelope() else {
             return Ok(ZonalStats::EMPTY);
         };
-        let Some(window) = center_window(g, l0, env) else {
+        let g = level_georef(g0, l0, lv);
+        let Some(window) = center_window(&g, lv, env) else {
             return Ok(ZonalStats::EMPTY);
         };
         let (ox, px) = (g.origin_x, g.pixel_x);
         let (oy, py) = (g.origin_y, g.pixel_y);
-        self.accumulate_window(meta, window, band, |col, row| {
+        self.accumulate_window(meta, level, window, band, |col, row| {
             let cx = ox + (col as f64 + 0.5) * px;
             let cy = oy - (row as f64 + 0.5) * py;
             zone.contains(cx, cy)
@@ -530,6 +577,57 @@ impl<S: ByteSource> CogReader<S> {
     }
 }
 
+/// 레벨 `lv` 의 georef — origin/EPSG 는 level 0 과 공유, 픽셀 크기는 크기
+/// 비율(w0/wL, h0/hL)로 유도한다 (오버뷰 IFD 에 geo 태그가 없는 GDAL COG
+/// 관행 — meta.rs 의 문서화된 규칙, #71).
+fn level_georef(g0: &Georef, l0: &LevelMeta, lv: &LevelMeta) -> Georef {
+    Georef {
+        epsg: g0.epsg,
+        origin_x: g0.origin_x,
+        origin_y: g0.origin_y,
+        pixel_x: g0.pixel_x * (l0.image_width as f64 / lv.image_width as f64),
+        pixel_y: g0.pixel_y * (l0.image_height as f64 / lv.image_height as f64),
+    }
+}
+
+/// 레벨 `level` 픽셀 1개가 대응하는 level-0 픽셀 수 (#71) — 원시 count/sum
+/// 을 level-0 추정치로 환산하는 계수. 레벨 부재 → 1.0.
+pub fn level_scale(meta: &CogMeta, level: usize) -> f64 {
+    match (meta.levels.first(), meta.levels.get(level)) {
+        (Some(l0), Some(lv)) => {
+            (l0.image_width as f64 / lv.image_width as f64)
+                * (l0.image_height as f64 / lv.image_height as f64)
+        }
+        _ => 1.0,
+    }
+}
+
+/// 픽셀 예산으로 레벨 선택 (#71): `max_pixels == 0` → 0 (exact, 기본 불변).
+/// fine→coarse 로 걸어 envelope 창 픽셀 수가 예산 이하인 첫 레벨을 고르고,
+/// 전부 초과면 최상위 오버뷰. 창 계산 불능(georef 부재 등) → 0.
+pub fn select_level(meta: &CogMeta, envelope: [f64; 4], max_pixels: u64) -> usize {
+    if max_pixels == 0 || meta.levels.len() <= 1 {
+        return 0;
+    }
+    let Some(g0) = &meta.georef else {
+        return 0;
+    };
+    let Some(l0) = meta.levels.first() else {
+        return 0;
+    };
+    for (i, lv) in meta.levels.iter().enumerate() {
+        let g = level_georef(g0, l0, lv);
+        let area = match center_window(&g, lv, envelope) {
+            Some((c0, c1, r0, r1)) => (c1 - c0 + 1) * (r1 - r0 + 1),
+            None => 0, // 비교차 — 어느 레벨이든 0픽셀
+        };
+        if area <= max_pixels {
+            return i;
+        }
+    }
+    meta.levels.len() - 1
+}
+
 /// bbox(중심 포함, 닫힌 구간) → level0 픽셀 창 (col_min, col_max, row_min, row_max).
 /// 이미지와 교차하지 않으면 None. center(col) = ox + (col+0.5)·px ∈ [xmin, xmax].
 fn center_window(g: &Georef, l0: &LevelMeta, bbox: [f64; 4]) -> Option<(u64, u64, u64, u64)> {
@@ -579,9 +677,16 @@ impl ZonalStats {
     /// stat 하나를 뽑는다 — count/나머지 비대칭 규약 (빈 집계: count → 0,
     /// 나머지 → None). 네이티브 RS_ZonalStats 와 wasm 사이드카(#66) 공용 (G11).
     pub fn value(&self, stat: ZonalStat) -> Option<f64> {
+        self.value_scaled(stat, 1.0)
+    }
+
+    /// 레벨 L 원시 집계를 level-0 추정으로 환산해 뽑는다 (#71 fast mode) —
+    /// count/sum 만 `scale`([`level_scale`]) 곱, mean 은 비율이라 불변,
+    /// min/max 는 원시(오버뷰 리샘플 감쇠는 문서화된 근사 특성).
+    pub fn value_scaled(&self, stat: ZonalStat, scale: f64) -> Option<f64> {
         match stat {
-            ZonalStat::Count => Some(self.count as f64),
-            ZonalStat::Sum => (self.count > 0).then_some(self.sum),
+            ZonalStat::Count => Some(self.count as f64 * scale),
+            ZonalStat::Sum => (self.count > 0).then(|| self.sum * scale),
             ZonalStat::Mean => self.mean(),
             ZonalStat::Min => self.min,
             ZonalStat::Max => self.max,
