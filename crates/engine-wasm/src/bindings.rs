@@ -304,6 +304,94 @@ pub fn zonal_stats_batch_zones(
     })
 }
 
+/// band_window* 결과 → JS 객체 (#76). `None`(범위 밖 밴드) → null,
+/// `Some(빈)`(비교차/빈 폴리곤) → {values: 빈, width: 0, height: 0, bbox: null},
+/// 그 외 → {values: Float64Array(NaN = 값 부재), width, height,
+/// bbox: [minx, miny, maxx, maxy] (래스터 CRS, 배치용)}.
+///
+/// 창 좌표는 `engine::envelope_window`(픽셀 중심 규약의 단일 소스)로 얻고,
+/// bbox 는 확정된 정수 rect 의 선형 변환 — 반올림 규약을 재계산하지 않는다.
+fn window_result(
+    meta: &CogMeta,
+    env: Option<[f64; 4]>,
+    win: Option<Vec<Option<f64>>>,
+) -> Result<JsValue, JsValue> {
+    let Some(win) = win else {
+        return Ok(JsValue::NULL); // 범위 밖 밴드 — 네이티브 NULL 행과 동형
+    };
+    let o = Object::new();
+    let values = js_sys::Float64Array::new_with_length(win.len() as u32);
+    for (i, v) in win.iter().enumerate() {
+        values.set_index(i as u32, v.unwrap_or(f64::NAN));
+    }
+    let rect = env
+        .and_then(|e| engine::envelope_window(meta, e))
+        .filter(|_| !win.is_empty());
+    match (rect, &meta.georef) {
+        (Some((c0, c1, r0, r1)), Some(g)) => {
+            set(&o, "width", ((c1 - c0 + 1) as f64).into());
+            set(&o, "height", ((r1 - r0 + 1) as f64).into());
+            let bbox = [
+                g.origin_x + c0 as f64 * g.pixel_x,
+                g.origin_y - (r1 + 1) as f64 * g.pixel_y,
+                g.origin_x + (c1 + 1) as f64 * g.pixel_x,
+                g.origin_y - r0 as f64 * g.pixel_y,
+            ]
+            .iter()
+            .map(|v| JsValue::from_f64(*v))
+            .collect::<Array>();
+            set(&o, "bbox", bbox.into());
+        }
+        _ => {
+            set(&o, "width", 0f64.into());
+            set(&o, "height", 0f64.into());
+            set(&o, "bbox", JsValue::NULL);
+        }
+    }
+    set(&o, "values", values.into());
+    Ok(o.into())
+}
+
+/// `bandWindowPolygon(url, zoneWkt, band)` → Promise — AOI 픽셀 창 (#76).
+/// 픽셀 중심 규약을 zonal 과 공유하므로 **렌더된 래스터 = 통계가 본 픽셀
+/// 집합**. NaN 은 nodata·폴리곤 밖 공통의 "값 부재" (구분 없음, 엔진 계약).
+#[wasm_bindgen(js_name = bandWindowPolygon)]
+pub fn band_window_polygon(url: String, zone_wkt: String, band: u32) -> Promise {
+    future_to_promise(async move {
+        let zone = parse_zone_wkt(&zone_wkt).map_err(err)?;
+        let opened = registry::open_cached(&url).await.map_err(err)?;
+        let win = opened
+            .1
+            .band_window_polygon(&opened.0, &zone, band)
+            .await
+            .map_err(err)?;
+        window_result(&opened.0, zone.envelope(), win)
+    })
+}
+
+/// `bandWindow(url, bbox, band)` → Promise — bbox([minx, miny, maxx, maxy])
+/// 창 (#76). bbox 필수: 전체 씬 읽기는 브라우저 footgun — 필요하면 cogMeta
+/// 의 geotransform 으로 씬 bbox 를 구성해 넘긴다.
+#[wasm_bindgen(js_name = bandWindow)]
+pub fn band_window(url: String, bbox: Array, band: u32) -> Promise {
+    future_to_promise(async move {
+        let b: Vec<f64> = bbox
+            .iter()
+            .map(|v| v.as_f64().ok_or_else(|| err("bbox must be 4 numbers")))
+            .collect::<Result<_, _>>()?;
+        let b: [f64; 4] = b
+            .try_into()
+            .map_err(|_| err("bbox must be [minx, miny, maxx, maxy]"))?;
+        let opened = registry::open_cached(&url).await.map_err(err)?;
+        let win = opened
+            .1
+            .band_window(&opened.0, Some(b), band)
+            .await
+            .map_err(err)?;
+        window_result(&opened.0, Some(b), win)
+    })
+}
+
 /// `configureTileCache(mb)` — 타일 캐시 상한 재설정 (0 = 비활성, 기본 64MB).
 /// 캐시 교체와 함께 리더 레지스트리도 비운다 (콜드 리셋).
 #[wasm_bindgen(js_name = configureTileCache)]

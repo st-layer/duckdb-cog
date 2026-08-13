@@ -30,8 +30,8 @@ pub use meta::{
 };
 #[cfg(feature = "reader")]
 pub use pixel::{
-    apply_nodata, level_scale, normalized_difference, open_cog, select_level, CogReader, ZonalStat,
-    ZonalStats,
+    apply_nodata, envelope_window, level_scale, normalized_difference, open_cog, select_level,
+    CogReader, ZonalStat, ZonalStats,
 };
 #[cfg(feature = "reader")]
 pub use source::{fetch_all, ByteSource, MemorySource, SourceError};
