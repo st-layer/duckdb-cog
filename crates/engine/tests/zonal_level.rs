@@ -135,3 +135,25 @@ fn value_scaled_applies_only_to_count_and_sum() {
         z.value(ZonalStat::Count)
     );
 }
+
+#[test]
+fn tile_cache_keys_are_level_scoped() {
+    // fast(레벨 1)가 올린 타일이 exact(레벨 0)의 같은 (x,y) 조회를 오염시키면
+    // 안 된다 — 레벨 간 타일 크기가 같아 shape 검사로는 안 걸리는 무음 오염.
+    let (meta, mut reader) = block_on(open_cog(MemorySource::new(fixture_bytes(
+        "basic_512x512_u16.tif",
+    ))))
+    .expect("valid COG");
+    let cache = engine::TileCache::new(256 * 1024 * 1024);
+    reader.attach_tile_cache(&cache);
+    let zone = parse_zone_wkt(P3).expect("valid WKT");
+
+    // fast 먼저 (레벨 1 타일이 캐시에 오름) → exact 가 골든 그대로여야 한다
+    let _fast = block_on(reader.zonal_stats_polygon_at(&meta, &zone, 1, 1)).expect("io ok");
+    let exact = block_on(reader.zonal_stats_polygon(&meta, &zone, 1)).expect("io ok");
+    assert_eq!(
+        (exact.count, exact.sum),
+        (7_267, 239_110_784.0),
+        "레벨 1 캐시 항목이 레벨 0 조회를 오염시킴 — 캐시 키에 레벨 필요"
+    );
+}

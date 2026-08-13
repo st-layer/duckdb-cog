@@ -58,6 +58,7 @@ impl<S: ByteSource> CogReader<S> {
     /// 의 single-flight 가 1회로 수렴). 미부착이면 현행 직행과 동일.
     async fn fetch_decoded(
         &self,
+        level: usize,
         ifd0: &ImageFileDirectory,
         tiles: &[(usize, usize)],
     ) -> Result<Vec<Arc<Array>>, MetaError> {
@@ -75,7 +76,8 @@ impl<S: ByteSource> CogReader<S> {
                 })
                 .collect();
         };
-        let keys: Vec<TileKey> = tiles.iter().map(|&(x, y)| (*rid, x, y)).collect();
+        // 캐시 키는 레벨 스코프 (#71) — 오버뷰 타일이 level-0 조회를 오염 금지
+        let keys: Vec<TileKey> = tiles.iter().map(|&(x, y)| (*rid, level, x, y)).collect();
         let mut out: Vec<Option<Arc<Array>>> = Vec::with_capacity(tiles.len());
         let mut misses: Vec<usize> = Vec::new(); // tiles 인덱스
         for claim in cache.claim(&keys) {
@@ -182,7 +184,7 @@ impl<S: ByteSource> CogReader<S> {
             .collect();
         tiles.sort_unstable();
         tiles.dedup();
-        let arrays = self.fetch_decoded(ifd0, &tiles).await?;
+        let arrays = self.fetch_decoded(0, ifd0, &tiles).await?;
         let planar = ifd0.planar_configuration();
         let mut decoded = std::collections::HashMap::with_capacity(tiles.len());
         for (key, array) in tiles.iter().zip(arrays) {
@@ -283,7 +285,7 @@ impl<S: ByteSource> CogReader<S> {
                 tiles.push((tx as usize, ty as usize));
             }
         }
-        let arrays = self.fetch_decoded(ifd, &tiles).await?;
+        let arrays = self.fetch_decoded(level, ifd, &tiles).await?;
         let planar = ifd.planar_configuration();
         let mut acc = ZonalStats::EMPTY;
         for ((tx, ty), array) in tiles.iter().zip(arrays) {
@@ -356,7 +358,7 @@ impl<S: ByteSource> CogReader<S> {
             }
         }
         let tiles: Vec<(usize, usize)> = tile_set.into_iter().collect();
-        let arrays = self.fetch_decoded(ifd, &tiles).await?;
+        let arrays = self.fetch_decoded(level, ifd, &tiles).await?;
         let by_tile: std::collections::HashMap<(usize, usize), std::sync::Arc<Array>> =
             tiles.into_iter().zip(arrays).collect();
         let planar = ifd.planar_configuration();
@@ -495,7 +497,7 @@ impl<S: ByteSource> CogReader<S> {
                 tiles.push((tx as usize, ty as usize));
             }
         }
-        let arrays = self.fetch_decoded(ifd0, &tiles).await?;
+        let arrays = self.fetch_decoded(0, ifd0, &tiles).await?;
         let planar = ifd0.planar_configuration();
         for ((tx, ty), array) in tiles.iter().zip(arrays) {
             let (tx0, ty0) = (*tx as u64 * tw, *ty as u64 * th);

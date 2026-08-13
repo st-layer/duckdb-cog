@@ -19,7 +19,10 @@ pub struct ReaderId(u64);
 
 /// (리더, tile_x, tile_y). 현 픽셀 경로는 level 0 만 fetch 한다 —
 /// 레벨이 추가되면 키를 넓힌다 (지금 넣으면 죽은 차원).
-pub(crate) type Key = (ReaderId, usize, usize);
+/// (reader, **level**, tile_x, tile_y) — 레벨이 키에 없으면 오버뷰 zonal(#71)의
+/// 타일이 같은 (x,y) 의 level-0 조회를 무음 오염시킨다 (레벨 간 타일 크기가
+/// 같아 shape 로도 안 걸림 — zonal_level.rs 회귀 가드).
+pub(crate) type Key = (ReaderId, usize, usize, usize);
 
 /// fetch 완료 신호: (done, Condvar). done 은 성공/실패 무관 "결판났음".
 type Signal = Arc<(Mutex<bool>, Condvar)>;
@@ -130,7 +133,17 @@ impl TileCache {
                         self.0.hits.fetch_add(1, Ordering::Relaxed);
                         return Claim::Hit(Arc::clone(arr));
                     }
-                    Some(Slot::Pending(sig)) => Arc::clone(sig),
+                    Some(Slot::Pending(sig)) => {
+                        if cfg!(target_arch = "wasm32") {
+                            // 단일 스레드 wasm 에선 Condvar 대기가 즉시 panic
+                            // (no_threads) — 경합 키는 중복 fetch 로 결판한다
+                            // (양쪽 다 fulfill, 마지막이 덮음 — 정확성 동일,
+                            // fulfill 의 교체 예산 회수와 한 쌍. #71 에서 발견).
+                            self.0.misses.fetch_add(1, Ordering::Relaxed);
+                            return Claim::Mine;
+                        }
+                        Arc::clone(sig)
+                    }
                     None => {
                         st.map.insert(
                             key,
@@ -167,6 +180,13 @@ impl TileCache {
                 },
             );
             st.used += bytes;
+            // 중복 fulfill(wasm 경합 경로)로 Ready 를 덮었다면 교체분 예산 회수
+            if let Some(Slot::Ready {
+                bytes: prev_bytes, ..
+            }) = &prev
+            {
+                st.used -= prev_bytes;
+            }
             // 예산 집행: 방금 넣은 것 포함 last_used 최소부터 — 엔트리 수백 규모라
             // O(n) 스캔으로 충분 (필지 AOI ≈ 타일 수십 개)
             while st.used > self.0.max_bytes {
