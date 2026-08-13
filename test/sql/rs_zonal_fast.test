@@ -1,0 +1,57 @@
+# name: test/sql/rs_zonal_fast.test
+# description: RS_ZonalStats(..., max_pixels) — 오버뷰 fast mode (#71). 근사값이라
+#   리터럴 고정 대신 exact 대비 불변식으로 판정한다 (엔진 zonal_level.rs 와 동일 계약).
+# group: [cog]
+
+require cog
+
+require-env COG_TEST_FIXTURES
+
+# max_pixels = 0 은 exact 와 완전 동일 (기본 동작 불변)
+query III
+SELECT (RS_ZonalStats(p, w, 1, 'count', 0) = RS_ZonalStats(p, w, 1, 'count'))::INT,
+       (RS_ZonalStats(p, w, 1, 'sum', 0) = RS_ZonalStats(p, w, 1, 'sum'))::INT,
+       (RS_ZonalStats(p, [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'count', 0)
+          = RS_ZonalStats(p, [300000.0, 3999000.0, 301000.0, 4000000.0], 1, 'count'))::INT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS p,
+             'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))' AS w);
+----
+1	1	1
+
+# fast (예산 5000 → 오버뷰 레벨 1): 근사 불변식 — mean 5% 이내, min/max 감쇠
+# 방향(nearest 부분집합), 환산 count 5% 이내
+query IIII
+SELECT (abs(RS_ZonalStats(p, w, 1, 'mean', 5000) - RS_ZonalStats(p, w, 1, 'mean'))
+          / RS_ZonalStats(p, w, 1, 'mean') < 0.05)::INT,
+       (RS_ZonalStats(p, w, 1, 'min', 5000) >= RS_ZonalStats(p, w, 1, 'min'))::INT,
+       (RS_ZonalStats(p, w, 1, 'max', 5000) <= RS_ZonalStats(p, w, 1, 'max'))::INT,
+       (abs(RS_ZonalStats(p, w, 1, 'count', 5000) - RS_ZonalStats(p, w, 1, 'count'))
+          / RS_ZonalStats(p, w, 1, 'count') < 0.05)::INT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS p,
+             'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))' AS w);
+----
+1	1	1	1
+
+# 배치 오버로드도 동일 규약 — max_pixels=0 은 4-인자와 원소 단위 동일
+query I
+SELECT (RS_ZonalStats(p, [w, w], 1, 'sum', 0) = RS_ZonalStats(p, [w, w], 1, 'sum'))::INT
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS p,
+             'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))' AS w);
+----
+1
+
+# NULL max_pixels → NULL 행 (다른 인자와 동일 규약)
+query I
+SELECT RS_ZonalStats(p, w, 1, 'count', NULL) IS NULL
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS p,
+             'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))' AS w);
+----
+true
+
+# 음수 예산은 에러
+statement error
+SELECT RS_ZonalStats(p, w, 1, 'count', -1)
+FROM (SELECT '${COG_TEST_FIXTURES}/basic_512x512_u16.tif' AS p,
+             'POLYGON ((300203.7 3999803.7, 301403.7 3999803.7, 300203.7 3998593.1, 300203.7 3999803.7))' AS w);
+----
+max_pixels must be >= 0

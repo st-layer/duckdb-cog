@@ -686,7 +686,7 @@ impl ZonalStats {
     pub fn value_scaled(&self, stat: ZonalStat, scale: f64) -> Option<f64> {
         match stat {
             ZonalStat::Count => Some(self.count as f64 * scale),
-            ZonalStat::Sum => (self.count > 0).then(|| self.sum * scale),
+            ZonalStat::Sum => (self.count > 0).then_some(self.sum * scale),
             ZonalStat::Mean => self.mean(),
             ZonalStat::Min => self.min,
             ZonalStat::Max => self.max,
