@@ -530,6 +530,17 @@ impl<S: ByteSource> CogReader<S> {
     }
 }
 
+/// bbox 의 level-0 픽셀 창 (col_min, col_max, row_min, row_max) — 픽셀 중심
+/// 포함 규약의 **단일 소스** (#76). georef/레벨 부재·비교차 → None.
+/// [`CogReader::band_window`] 가 읽는 창과 항상 같은 모양이므로, 호출측
+/// (wasm 바인딩 등)은 width/height/배치 bbox 를 이 함수로 얻는다 — 반올림
+/// 규약을 바깥에서 재계산하지 않는다.
+pub fn envelope_window(meta: &CogMeta, bbox: [f64; 4]) -> Option<(u64, u64, u64, u64)> {
+    let g = meta.georef.as_ref()?;
+    let l0 = meta.levels.first()?;
+    center_window(g, l0, bbox)
+}
+
 /// bbox(중심 포함, 닫힌 구간) → level0 픽셀 창 (col_min, col_max, row_min, row_max).
 /// 이미지와 교차하지 않으면 None. center(col) = ox + (col+0.5)·px ∈ [xmin, xmax].
 fn center_window(g: &Georef, l0: &LevelMeta, bbox: [f64; 4]) -> Option<(u64, u64, u64, u64)> {
