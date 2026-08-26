@@ -1,0 +1,23 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "gimje-plain-bench-aoi (~1.3 km^2)" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [126.878, 36.02],
+            [126.8905, 36.0185],
+            [126.8935, 36.0225],
+            [126.8925, 36.0285],
+            [126.884, 36.0305],
+            [126.8785, 36.0265],
+            [126.878, 36.02]
+          ]
+        ]
+      }
+    }
+  ]
+}
